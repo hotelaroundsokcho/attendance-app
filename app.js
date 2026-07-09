@@ -439,16 +439,19 @@ function switchTab(name) {
   ['dash', 'maids', 'admins', 'export'].forEach(t => {
     $('#tab-' + t).style.display = (t === name) ? 'block' : 'none';
   });
-  if (name === 'dash') loadDash();
+  if (name === 'dash') { loadDash(); initCalDate(); }
   if (name === 'maids') loadMaids();
   if (name === 'admins') loadAdmins();
   if (name === 'export') initExportDates();
 }
 
+let lastDashData = null;
+
 async function loadDash() {
   const data = await adminApi({ action: 'adminGetDashboard' }, { msg: '현황 불러오는 중... Loading status...' });
   if (!data) return;
   if (apiFail(data)) return;
+  lastDashData = data;
   $('#st-total').textContent = data.totalMaids != null ? data.totalMaids : '-';
   $('#st-in').textContent = data.checkedInCount != null ? data.checkedInCount : '-';
   $('#st-y').textContent = data.lunchYes != null ? data.lunchYes : '-';
@@ -485,6 +488,100 @@ async function loadDash() {
 }
 
 /* ---------------------------------------------------------
+ * 7-1. 관리자: 대시보드 카드 → 상세 모달
+ * --------------------------------------------------------- */
+function lunchPillHtml(lv) {
+  return isLunchYes(lv) ? '<span class="pill y">먹음/Yes</span>'
+    : isLunchNo(lv) ? '<span class="pill n">안먹음/No</span>'
+      : '<span class="pill gray">-</span>';
+}
+
+function checkedInTableHtml(rows) {
+  if (!rows.length) return '<p class="notice" style="text-align:left">해당하는 인원이 없습니다. / No one matches.</p>';
+  let html = '<table class="list"><thead><tr><th>이름 <span class="slash-en">Name</span></th><th>출근 <span class="slash-en">In</span></th><th>점심 <span class="slash-en">Lunch</span></th><th>점심변경 <span class="slash-en">Updated</span></th></tr></thead><tbody>';
+  rows.forEach(r => {
+    html += '<tr><td>' + escapeHtml(r.name || r.maidName) + '</td><td>' + escapeHtml(r.checkInTime || '') + '</td><td>' + lunchPillHtml(r.lunch) + '</td><td>' + escapeHtml(r.lunchUpdatedAt || '') + '</td></tr>';
+  });
+  return html + '</tbody></table>';
+}
+
+function openDetailModal(titleHtml, bodyHtml) {
+  $('#detail-title').innerHTML = titleHtml;
+  $('#detail-body').innerHTML = bodyHtml;
+  $('#detail-modal').classList.add('on');
+}
+function closeDetailModal() {
+  $('#detail-modal').classList.remove('on');
+}
+
+function showDashDetail(key) {
+  if (!lastDashData) {
+    toast('현황을 아직 불러오는 중입니다. 잠시 후 다시 시도해 주세요. / Status is still loading. Please try again shortly.');
+    return;
+  }
+  const checkedIn = lastDashData.checkedInList || [];
+  const notIn = lastDashData.notCheckedInList || [];
+
+  if (key === 'total') {
+    let html = '<table class="list"><thead><tr><th>이름 <span class="slash-en">Name</span></th><th>상태 <span class="slash-en">Status</span></th></tr></thead><tbody>';
+    checkedIn.forEach(r => {
+      html += '<tr><td>' + escapeHtml(r.name || r.maidName) + '</td><td><span class="pill y">출근/In</span></td></tr>';
+    });
+    notIn.forEach(r => {
+      html += '<tr><td>' + escapeHtml(r.name || r.maidName) + '</td><td><span class="pill gray">미출근/Not in</span></td></tr>';
+    });
+    html += '</tbody></table>';
+    if (!checkedIn.length && !notIn.length) html = '<p class="notice" style="text-align:left">등록된 메이드가 없습니다. / No maids registered.</p>';
+    openDetailModal('전체 메이드 (' + (checkedIn.length + notIn.length) + '명)<span class="en">All maids</span>', html);
+  } else if (key === 'in') {
+    openDetailModal('출근한 메이드 (' + checkedIn.length + '명)<span class="en">Checked in</span>', checkedInTableHtml(checkedIn));
+  } else if (key === 'y') {
+    const yes = checkedIn.filter(r => isLunchYes(r.lunch));
+    openDetailModal('점심 먹음 (' + yes.length + '명)<span class="en">Lunch: Yes</span>', checkedInTableHtml(yes));
+  } else if (key === 'n') {
+    const no = checkedIn.filter(r => isLunchNo(r.lunch));
+    openDetailModal('점심 안 먹음 (' + no.length + '명)<span class="en">Lunch: No</span>', checkedInTableHtml(no));
+  }
+}
+
+/* ---------------------------------------------------------
+ * 7-2. 관리자: 날짜별 조회 (기존 adminExportRange 재사용)
+ * --------------------------------------------------------- */
+function initCalDate() {
+  if (!$('#cal-date').value) {
+    const iso = new Date().toISOString().slice(0, 10);
+    $('#cal-date').value = iso;
+  }
+}
+
+async function searchCalDate() {
+  const date = $('#cal-date').value;
+  if (!date) {
+    toast('조회할 날짜를 선택해 주세요. / Please choose a date to look up.');
+    return;
+  }
+  const data = await adminApi({ action: 'adminExportRange', startDate: date, endDate: date }, { msg: '기록 조회 중... Looking up records...' });
+  if (!data) return;
+  if (apiFail(data)) return;
+  const rows = data.rows || [];
+  const box = $('#cal-result');
+  if (!rows.length) {
+    box.innerHTML = '<p class="notice" style="text-align:left">' + escapeHtml(date) + '에는 출근 기록이 없습니다.<span class="en">No check-in records on ' + escapeHtml(date) + '.</span></p>';
+    return;
+  }
+  const yesCount = rows.filter(r => isLunchYes(r.lunch)).length;
+  const noCount = rows.filter(r => isLunchNo(r.lunch)).length;
+  let html = '<p class="notice" style="text-align:left;margin-bottom:10px">출근 ' + rows.length + '명 · 점심 먹음 ' + yesCount + '명 · 안먹음 ' + noCount + '명'
+    + '<span class="en">Checked in: ' + rows.length + ' · Lunch yes: ' + yesCount + ' · no: ' + noCount + '</span></p>';
+  html += '<table class="list"><thead><tr><th>이름 <span class="slash-en">Name</span></th><th>출근 <span class="slash-en">In</span></th><th>점심 <span class="slash-en">Lunch</span></th><th>점심변경 <span class="slash-en">Updated</span></th></tr></thead><tbody>';
+  rows.forEach(r => {
+    html += '<tr><td>' + escapeHtml(r.maidName || '') + '</td><td>' + escapeHtml(r.checkInTime || '') + '</td><td>' + lunchPillHtml(r.lunch) + '</td><td>' + escapeHtml(r.lunchUpdatedAt || '') + '</td></tr>';
+  });
+  html += '</tbody></table>';
+  box.innerHTML = html;
+}
+
+/* ---------------------------------------------------------
  * 8. 관리자: 메이드 관리
  * --------------------------------------------------------- */
 async function loadMaids() {
@@ -505,13 +602,103 @@ async function loadMaids() {
       + '<button class="btn small danger" data-act="del" data-id="' + m.maidId + '" data-name="' + escapeHtml(m.name) + '">삭제<span class="en">Remove</span></button>'
       + '</div>'
       : '';
+    const chk = active
+      ? '<input type="checkbox" class="maid-chk" data-id="' + m.maidId + '" data-name="' + escapeHtml(m.name) + '">'
+      : '';
     const tr = document.createElement('tr');
-    tr.innerHTML = '<td>' + escapeHtml(m.name) + '</td><td>' + statusPill + '</td><td>' + actions + '</td>';
+    tr.innerHTML = '<td>' + chk + '</td><td>' + escapeHtml(m.name) + '</td><td>' + statusPill + '</td><td>' + actions + '</td>';
     body.appendChild(tr);
   });
   if (!(data.maids || []).length) {
-    body.innerHTML = '<tr><td colspan="3" class="notice">등록된 메이드가 없습니다. / No maids registered.</td></tr>';
+    body.innerHTML = '<tr><td colspan="4" class="notice">등록된 메이드가 없습니다. / No maids registered.</td></tr>';
   }
+}
+
+/* ---------------------------------------------------------
+ * 8-1. 관리자: 메이드 일괄 추가 / 일괄 삭제
+ * --------------------------------------------------------- */
+async function bulkAddMaids() {
+  const raw = $('#bulk-maid-names').value;
+  const names = raw.split(/[\n,]/).map(s => s.trim()).filter(Boolean);
+  if (!names.length) {
+    toast('추가할 이름을 한 줄에 하나씩 입력해 주세요. / Enter one name per line to add.');
+    return;
+  }
+  // 현재 활동중인 메이드 명단을 먼저 조회해 중복 이름은 건너뜀 (방어적 처리)
+  const listData = await adminApi({ action: 'adminGetMaidList' }, { msg: '중복 확인 중... Checking duplicates...' });
+  if (!listData) return;
+  if (apiFail(listData)) return;
+  const existing = new Set((listData.maids || [])
+    .filter(m => m.status === 'active')
+    .map(m => m.name.trim().toLowerCase()));
+
+  // 이번 입력 내 중복도 제거
+  const seen = new Set();
+  const toAdd = [];
+  const skippedDup = [];
+  names.forEach(n => {
+    const key = n.toLowerCase();
+    if (existing.has(key) || seen.has(key)) { skippedDup.push(n); return; }
+    seen.add(key);
+    toAdd.push(n);
+  });
+
+  if (!toAdd.length) {
+    toast('입력한 이름이 모두 이미 등록되어 있습니다. / All entered names are already registered.');
+    return;
+  }
+
+  showOverlay('일괄 추가 중... (0/' + toAdd.length + ') Adding...');
+  let okCount = 0;
+  const failed = [];
+  for (let i = 0; i < toAdd.length; i++) {
+    $('.msg', $('#overlay')).textContent = '일괄 추가 중... (' + (i + 1) + '/' + toAdd.length + ') Adding...';
+    const data = await adminApi({ action: 'adminAddMaid', name: toAdd[i] }, { silent: true });
+    if (data && data.success) okCount++;
+    else failed.push(toAdd[i]);
+  }
+  hideOverlay();
+
+  $('#bulk-maid-names').value = '';
+  let msg = okCount + '명 추가 완료. / ' + okCount + ' added.';
+  if (skippedDup.length) msg += ' (중복 건너뜀 ' + skippedDup.length + '명 / ' + skippedDup.length + ' skipped as duplicates)';
+  if (failed.length) msg += ' (실패 ' + failed.length + '명: ' + failed.join(', ') + ')';
+  toast(msg);
+  loadMaids();
+}
+
+function getSelectedMaidChecks() {
+  return $all('.maid-chk').filter(c => c.checked);
+}
+
+async function bulkDeleteMaids() {
+  const checked = getSelectedMaidChecks();
+  if (!checked.length) {
+    toast('삭제할 메이드를 먼저 선택해 주세요. / Please select maids to delete first.');
+    return;
+  }
+  const names = checked.map(c => c.dataset.name);
+  const ok = confirm(
+    '다음 ' + checked.length + '명을 삭제할까요? 과거 출근기록은 이름 그대로 보존됩니다.\n' + names.join(', ')
+    + '\n\nRemove these ' + checked.length + ' maids? Past attendance records will be kept under their names.\n' + names.join(', ')
+  );
+  if (!ok) return;
+
+  showOverlay('일괄 삭제 중... (0/' + checked.length + ') Removing...');
+  let okCount = 0;
+  const failed = [];
+  for (let i = 0; i < checked.length; i++) {
+    $('.msg', $('#overlay')).textContent = '일괄 삭제 중... (' + (i + 1) + '/' + checked.length + ') Removing...';
+    const data = await adminApi({ action: 'adminDeleteMaid', maidId: checked[i].dataset.id }, { silent: true });
+    if (data && data.success) okCount++;
+    else failed.push(checked[i].dataset.name);
+  }
+  hideOverlay();
+
+  let msg = okCount + '명 삭제 완료. / ' + okCount + ' removed.';
+  if (failed.length) msg += ' (실패: ' + failed.join(', ') + ')';
+  toast(msg);
+  loadMaids();
 }
 
 async function addMaid() {
@@ -721,8 +908,22 @@ $all('.tabs button').forEach(b => {
 });
 $('#dash-refresh').addEventListener('click', loadDash);
 
+$('#stat-row').addEventListener('click', e => {
+  const card = e.target.closest('.stat[data-key]');
+  if (!card) return;
+  showDashDetail(card.dataset.key);
+});
+$('#detail-close').addEventListener('click', closeDetailModal);
+$('#detail-modal').addEventListener('click', e => {
+  if (e.target.id === 'detail-modal') closeDetailModal();
+});
+
+$('#cal-search').addEventListener('click', searchCalDate);
+
 $('#btn-add-maid').addEventListener('click', addMaid);
 $('#new-maid-name').addEventListener('keydown', e => { if (e.key === 'Enter') addMaid(); });
+$('#btn-bulk-add-maid').addEventListener('click', bulkAddMaids);
+$('#btn-bulk-del-maid').addEventListener('click', bulkDeleteMaids);
 $('#tbl-maids').addEventListener('click', e => {
   const b = e.target.closest('button[data-act]');
   if (!b) return;
