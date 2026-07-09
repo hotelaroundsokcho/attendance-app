@@ -136,6 +136,27 @@ table.list td{padding:10px 6px;border-bottom:1px solid var(--line);font-variant-
 .inline-add input{flex:1}
 .inline-add .btn{width:auto;padding:12px 18px;font-size:15px}
 .range{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px}
+.stat{cursor:pointer;transition:background .1s}
+.stat:active{background:var(--bg)}
+textarea{width:100%;border:1.5px solid var(--line);border-radius:12px;background:#fff;font-family:inherit;font-size:16px;padding:12px;color:var(--ink);resize:vertical}
+textarea:focus{outline:2px solid var(--blue);outline-offset:1px;border-color:var(--blue)}
+details.card{padding:16px 20px}
+details.card summary{cursor:pointer;font-weight:700;font-size:15px;list-style:none}
+details.card summary::-webkit-details-marker{display:none}
+details.card summary::before{content:'+ ';color:var(--blue);font-weight:900}
+details.card[open] summary::before{content:'- '}
+.chk-col{width:30px}
+.maid-chk{width:18px;height:18px}
+
+/* ---------- 상세 바텀시트 모달 ---------- */
+#detail-modal{position:fixed;inset:0;background:rgba(23,38,59,.55);display:none;align-items:flex-end;justify-content:center;z-index:98}
+#detail-modal.on{display:flex}
+#detail-modal .sheet{background:#fff;width:100%;max-width:520px;border-radius:20px 20px 0 0;padding:20px 20px 30px;max-height:78vh;overflow-y:auto;animation:sheetup .18s ease}
+@keyframes sheetup{from{transform:translateY(16px);opacity:.4}to{transform:none;opacity:1}}
+#detail-modal .sheet-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;gap:10px}
+#detail-modal .sheet-head h2{font-size:18px;font-weight:900;line-height:1.3}
+#detail-modal .sheet-head h2 .en{font-size:.62em;display:block;font-weight:600;opacity:.75}
+#detail-modal .close{flex:none;border:none;background:var(--bg);width:34px;height:34px;border-radius:50%;font-size:16px;font-weight:700;cursor:pointer;color:var(--muted)}
 
 /* ---------- 로딩 오버레이 ---------- */
 #overlay{
@@ -280,12 +301,13 @@ footer button{border:none;background:none;font-family:inherit;color:var(--muted)
 
       <!-- 현황 -->
       <div id="tab-dash">
-        <div class="stat-row">
-          <div class="stat"><b id="st-total">-</b><span>전체<span class="en">Total</span></span></div>
-          <div class="stat"><b id="st-in">-</b><span>출근<span class="en">In</span></span></div>
-          <div class="stat"><b id="st-y" style="color:var(--green)">-</b><span>점심 먹음<span class="en">Lunch Y</span></span></div>
-          <div class="stat"><b id="st-n" style="color:var(--red)">-</b><span>안 먹음<span class="en">Lunch N</span></span></div>
+        <div class="stat-row" id="stat-row">
+          <div class="stat" data-key="total"><b id="st-total">-</b><span>전체<span class="en">Total</span></span></div>
+          <div class="stat" data-key="in"><b id="st-in">-</b><span>출근<span class="en">In</span></span></div>
+          <div class="stat" data-key="y"><b id="st-y" style="color:var(--green)">-</b><span>점심 먹음<span class="en">Lunch Y</span></span></div>
+          <div class="stat" data-key="n"><b id="st-n" style="color:var(--red)">-</b><span>안 먹음<span class="en">Lunch N</span></span></div>
         </div>
+        <p class="notice" style="text-align:left;margin:-8px 0 14px">카드를 누르면 상세 명단을 볼 수 있어요.<span class="en">Tap a card to see the detailed list.</span></p>
         <div class="card">
           <b>출근한 메이드<span class="en">Checked-in maids</span></b>
           <table class="list" id="tbl-in"><thead><tr><th>이름 <span class="slash-en">Name</span></th><th>출근 <span class="slash-en">In</span></th><th>점심 <span class="slash-en">Lunch</span></th><th>점심변경 <span class="slash-en">Updated</span></th></tr></thead><tbody></tbody></table>
@@ -295,6 +317,15 @@ footer button{border:none;background:none;font-family:inherit;color:var(--muted)
           <table class="list" id="tbl-out"><thead><tr><th>이름 <span class="slash-en">Name</span></th></tr></thead><tbody></tbody></table>
         </div>
         <button class="btn" id="dash-refresh">새로고침<span class="en">Refresh</span></button>
+
+        <p class="sub" style="margin:26px 0 0">다른 날짜의 기록이 궁금하신가요?<span class="en">Looking for another day's records?</span></p>
+        <div class="card">
+          <b>날짜별 조회<span class="en">Look up by date</span></b>
+          <label class="fld" style="margin-top:12px">조회할 날짜 <span class="en">/ Date</span></label>
+          <input type="date" id="cal-date">
+          <button class="btn" id="cal-search" style="margin-top:12px">조회<span class="en">Look up</span></button>
+          <div id="cal-result" style="margin-top:14px"></div>
+        </div>
       </div>
 
       <!-- 메이드 관리 -->
@@ -303,8 +334,18 @@ footer button{border:none;background:none;font-family:inherit;color:var(--muted)
           <input type="text" id="new-maid-name" placeholder="새 메이드 이름 / New maid name">
           <button class="btn" id="btn-add-maid">추가<span class="en">Add</span></button>
         </div>
+        <details class="card" style="margin-bottom:14px">
+          <summary>여러 명 한 번에 추가 <span class="en">Add multiple maids at once</span></summary>
+          <p class="notice" style="text-align:left;margin-top:10px">이름을 한 줄에 하나씩 입력하세요. 이미 등록된 이름은 자동으로 건너뜁니다.<span class="en">Enter one name per line. Names that already exist will be skipped automatically.</span></p>
+          <textarea id="bulk-maid-names" rows="4" placeholder="예 / e.g.&#10;최지영&#10;박은정&#10;이수민" style="margin-top:10px"></textarea>
+          <button class="btn" id="btn-bulk-add-maid" style="margin-top:12px">일괄 추가<span class="en">Add all</span></button>
+        </details>
         <div class="card">
-          <table class="list" id="tbl-maids"><thead><tr><th>이름 <span class="slash-en">Name</span></th><th>상태 <span class="slash-en">Status</span></th><th>관리 <span class="slash-en">Actions</span></th></tr></thead><tbody></tbody></table>
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:8px">
+            <b>메이드 명단<span class="en">Maid list</span></b>
+            <button class="btn small danger" id="btn-bulk-del-maid">선택 삭제<span class="en">Delete selected</span></button>
+          </div>
+          <table class="list" id="tbl-maids"><thead><tr><th class="chk-col"></th><th>이름 <span class="slash-en">Name</span></th><th>상태 <span class="slash-en">Status</span></th><th>관리 <span class="slash-en">Actions</span></th></tr></thead><tbody></tbody></table>
         </div>
       </div>
 
@@ -360,6 +401,17 @@ footer button{border:none;background:none;font-family:inherit;color:var(--muted)
 </div>
 
 <div id="toast"></div>
+
+<!-- 대시보드 카드 상세 / 날짜별 조회 결과 모달 -->
+<div id="detail-modal">
+  <div class="sheet">
+    <div class="sheet-head">
+      <h2 id="detail-title"></h2>
+      <button class="close" id="detail-close" aria-label="닫기 Close">✕</button>
+    </div>
+    <div id="detail-body"></div>
+  </div>
+</div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="app.js"></script>
