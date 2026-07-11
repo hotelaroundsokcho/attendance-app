@@ -348,7 +348,7 @@ function renderAfterCheckin(checkInTime, lunch, lunchUpdatedAt, lunchLocked) {
   if (lunchLocked) {
     postButtons.forEach(b => { b.disabled = true; });
     noticeEl.className = 'notice locked';
-    noticeEl.innerHTML = '🔒 13:00 마감으로 더 이상 직접 변경할 수 없어요. 변경이 필요하면 관리자에게 문의해 주세요.<span class="en">The 13:00 deadline has passed — you can no longer change this yourself. Please contact the manager if you need a change.</span>';
+    noticeEl.innerHTML = '🔒&nbsp;13:00&nbsp;마감으로&nbsp;더&nbsp;이상&nbsp;직접&nbsp;변경할&nbsp;수&nbsp;없어요.<br>변경이 필요하면 관리자에게 문의해 주세요.<span class="en">The 13:00 deadline has passed — you can no longer change this yourself. Please contact the manager if you need a change.</span>';
   } else {
     postButtons.forEach(b => { b.disabled = false; });
     noticeEl.className = 'notice';
