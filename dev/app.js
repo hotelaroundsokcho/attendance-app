@@ -1,12 +1,17 @@
 /* ============================================================
  * 호텔어라운드 속초 - 메이드 출근확인 및 점심식사 확인 앱
  * Hotel Around Sokcho - Maid Check-In & Lunch App
- * app.js  (독립 프론트엔드 / Apps Script 백엔드 연동)
+ * app.js (독립 프론트엔드 / Apps Script 백엔드 연동)
  * 모든 사용자 문구 한영 병기 (Korean/English bilingual UI)
+ *
+ * [2026-07-11 정책 변경 반영]
+ * - 출근이 점심 선택보다 우선한다 (점심 미선택이어도 출근 가능)
+ * - 점심은 13:00까지 메이드가 직접 선택/변경 가능
+ * - 13:00 이후에는 메이드 직접 변경 불가, 관리자만 adminUpdateLunch로 수정 가능
  * ============================================================ */
 
 const CONFIG = {
-  API_URL: 'https://script.google.com/macros/s/AKfycbzppX2fMV8hE4mgkbPb5aVz43tDtGP6JKqo9je92f4233u3wlRpiUstnnzo8AxL7TKZ/exec',
+  API_URL: 'https://script.google.com/macros/s/AKfycbyKc25bQnGprEFGEtkSrBaFxFL59lXAOAQG9x9AbUuF6XwN2Cw1qbJf5rQI9qm10lFf/exec',
   DEVICE_TOKEN_KEY: 'attn_device_token',
   ADMIN_TOKEN_KEY: 'attn_admin_token',
   ADMIN_USER_KEY: 'attn_admin_user',
@@ -87,6 +92,7 @@ const ERR_MSG = {
   DEVICE_MISMATCH: '처음 등록한 폰이 아닙니다. 관리자에게 PIN 초기화를 요청해 주세요. / This is not your original phone. Please ask the manager to reset your PIN.',
   ALREADY_CHECKED_IN: '오늘은 이미 출근 처리되었습니다. / You have already checked in today.',
   NOT_CHECKED_IN_TODAY: '오늘 출근 기록이 없습니다. 먼저 출근해 주세요. / No check-in record today. Please check in first.',
+  LUNCH_LOCKED: '점심 변경 마감(13:00)이 지났습니다. 변경이 필요하면 관리자에게 문의해 주세요. / The 13:00 lunch deadline has passed. Please contact the manager if you need a change.',
   ADMIN_NOT_FOUND: '관리자 계정을 찾을 수 없습니다. / Manager account not found.',
   WRONG_PASSWORD: '비밀번호가 올바르지 않습니다. / Incorrect password.',
   MISSING_NAME: '이름을 입력해 주세요. / Please enter a name.',
@@ -136,9 +142,6 @@ function apiFail(data) {
 /* ---------------------------------------------------------
  * 3. 메이드: 이름 선택
  * --------------------------------------------------------- */
-let currentMaid = null;   // {maidId, name, hasPin}
-let pinMode = null;       // 'register' | 'login' | 'reset'
-
 async function loadNameGrid() {
   const data = await api({ action: 'getMaidList' }, { msg: '명단을 불러오는 중... Loading names...' });
   if (apiFail(data)) return;
@@ -159,6 +162,9 @@ async function loadNameGrid() {
 /* ---------------------------------------------------------
  * 4. 메이드: PIN 등록 / 입력 / 재설정
  * --------------------------------------------------------- */
+let currentMaid = null; // {maidId, name, hasPin}
+let pinMode = null; // 'register' | 'login' | 'reset'
+
 function setupPinBoxes() {
   ['#pin-box1', '#pin-box2'].forEach(boxSel => {
     const inputs = $all('input', $(boxSel));
@@ -279,7 +285,7 @@ async function submitPin() {
 /* ---------------------------------------------------------
  * 5. 메이드: 메인 (출근 / 점심)
  * --------------------------------------------------------- */
-let preLunch = null; // 출근 전 선택한 점심 값 'Y' | 'N'
+let preLunch = null; // 출근 전 선택한 점심 값 'Y' | 'N' | null(미선택)
 
 function todayLabel() {
   const d = new Date();
@@ -301,14 +307,26 @@ async function enterMain() {
   const data = await api({ action: 'checkStatusToday', maidId: currentMaid.maidId }, { msg: '오늘 기록 확인 중... Checking today...' });
   if (apiFail(data)) { showScreen('scr-name'); return; }
   if (data.checkedIn) {
-    renderAfterCheckin(data.checkInTime, data.lunch, data.lunchUpdatedAt);
+    renderAfterCheckin(data.checkInTime, data.lunch, data.lunchUpdatedAt, data.lunchLocked);
   } else {
     preLunch = null;
     paintLunchToggle('#lunch-pre', null);
     $('#before-checkin').style.display = 'block';
     $('#after-checkin').style.display = 'none';
+    renderPrecheckinNotice(data.lunchLocked);
   }
   showScreen('scr-main');
+}
+
+function renderPrecheckinNotice(lunchLocked) {
+  const el = $('#precheckin-notice');
+  if (lunchLocked) {
+    el.className = 'notice locked';
+    el.innerHTML = '⚠ 이미 13:00이 지났습니다. 지금 점심을 정하지 않으면 자동으로 "안 먹어요"로 처리돼요.<span class="en">It is already past 13:00. If you do not choose now, lunch will automatically be set to "No".</span>';
+  } else {
+    el.className = 'notice';
+    el.innerHTML = '점심을 아직 정하지 않았어도 출근할 수 있어요. 점심은 13:00까지 언제든 정하거나 바꿀 수 있습니다.<span class="en">You can check in even without choosing lunch yet. You can pick or change it anytime until 13:00.</span>';
+  }
 }
 
 function paintLunchToggle(sel, v) {
@@ -318,30 +336,40 @@ function paintLunchToggle(sel, v) {
   });
 }
 
-function renderAfterCheckin(checkInTime, lunch, lunchUpdatedAt) {
+function renderAfterCheckin(checkInTime, lunch, lunchUpdatedAt, lunchLocked) {
   $('#before-checkin').style.display = 'none';
   $('#after-checkin').style.display = 'block';
   $('#done-time').textContent = checkInTime || '';
   const v = isLunchYes(lunch) ? 'Y' : (isLunchNo(lunch) ? 'N' : null);
   paintLunchToggle('#lunch-post', v);
+
+  const postButtons = $all('#lunch-post button');
+  const noticeEl = $('#lunch-notice');
+  if (lunchLocked) {
+    postButtons.forEach(b => { b.disabled = true; });
+    noticeEl.className = 'notice locked';
+    noticeEl.innerHTML = '🔒 13:00 마감으로 더 이상 직접 변경할 수 없어요. 변경이 필요하면 관리자에게 문의해 주세요.<span class="en">The 13:00 deadline has passed — you can no longer change this yourself. Please contact the manager if you need a change.</span>';
+  } else {
+    postButtons.forEach(b => { b.disabled = false; });
+    noticeEl.className = 'notice';
+    noticeEl.innerHTML = '점심은 13:00까지 언제든 바꿀 수 있어요.<span class="en">You can change your lunch anytime until 13:00.</span>';
+  }
+
   $('#lunch-updated').textContent = lunchUpdatedAt
     ? ('마지막 변경 Last change: ' + lunchUpdatedAt)
     : '';
 }
 
 async function doCheckIn() {
-  if (!preLunch) {
-    toast('점심을 먼저 선택해 주세요. / Please choose your lunch first.');
-    return;
-  }
+  // 정책 변경: 점심 미선택이어도 출근 가능. preLunch가 없으면 빈 값으로 전송한다.
   const data = await api({
     action: 'checkIn',
     maidId: currentMaid.maidId,
-    lunch: preLunch
+    lunch: preLunch || ''
   }, { msg: '출근 처리 중... Checking in...' });
   if (data.success) {
     toast('출근이 완료되었습니다! / You are checked in!');
-    renderAfterCheckin(data.checkInTime, data.lunch || preLunch, null);
+    renderAfterCheckin(data.checkInTime, data.lunch, null, data.lunchLocked);
   } else if (data.error === 'ALREADY_CHECKED_IN') {
     toast(errMsg(data.error));
     enterMain();
@@ -363,6 +391,10 @@ async function changeLunch(v) {
       ? ('마지막 변경 Last change: ' + data.lunchUpdatedAt)
       : '';
   } else if (data.error === 'NOT_CHECKED_IN_TODAY') {
+    toast(errMsg(data.error));
+    enterMain();
+  } else if (data.error === 'LUNCH_LOCKED') {
+    // 마감 이후 상태를 화면에도 반영 (재조회하여 잠금 UI로 갱신)
     toast(errMsg(data.error));
     enterMain();
   } else {
@@ -457,6 +489,8 @@ async function loadDash() {
   $('#st-y').textContent = data.lunchYes != null ? data.lunchYes : '-';
   $('#st-n').textContent = data.lunchNo != null ? data.lunchNo : '-';
 
+  $('#dash-lunch-lock-notice').style.display = data.lunchLocked ? 'block' : 'none';
+
   const inBody = $('#tbl-in tbody');
   inBody.innerHTML = '';
   (data.checkedInList || []).forEach(r => {
@@ -464,15 +498,19 @@ async function loadDash() {
     const lv = r.lunch;
     const pill = isLunchYes(lv) ? '<span class="pill y">먹음/Yes</span>'
       : isLunchNo(lv) ? '<span class="pill n">안먹음/No</span>'
-        : '<span class="pill gray">-</span>';
+      : '<span class="pill gray">-</span>';
     tr.innerHTML = '<td>' + escapeHtml(r.name || r.maidName) + '</td>'
       + '<td>' + escapeHtml(r.checkInTime || '') + '</td>'
       + '<td>' + pill + '</td>'
-      + '<td>' + escapeHtml(r.lunchUpdatedAt || '') + '</td>';
+      + '<td>' + escapeHtml(r.lunchUpdatedAt || '') + '</td>'
+      + '<td><div class="row-actions">'
+      + '<button class="btn small" data-lunch-edit="Y" data-id="' + r.maidId + '" data-name="' + escapeHtml(r.name || r.maidName) + '">먹음<span class="en">Yes</span></button>'
+      + '<button class="btn small danger" data-lunch-edit="N" data-id="' + r.maidId + '" data-name="' + escapeHtml(r.name || r.maidName) + '">안먹음<span class="en">No</span></button>'
+      + '</div></td>';
     inBody.appendChild(tr);
   });
   if (!(data.checkedInList || []).length) {
-    inBody.innerHTML = '<tr><td colspan="4" class="notice">아직 출근한 메이드가 없습니다. / No one has checked in yet.</td></tr>';
+    inBody.innerHTML = '<tr><td colspan="5" class="notice">아직 출근한 메이드가 없습니다. / No one has checked in yet.</td></tr>';
   }
 
   const outBody = $('#tbl-out tbody');
@@ -488,12 +526,23 @@ async function loadDash() {
 }
 
 /* ---------------------------------------------------------
+ * 7-0. 관리자: 대시보드에서 점심 값 직접 수정 (13:00 마감 이후에도 항상 허용)
+ * --------------------------------------------------------- */
+async function adminEditLunch(maidId, lunch, name) {
+  const data = await adminApi({ action: 'adminUpdateLunch', maidId, lunch }, { msg: (name || '') + ' 점심 수정 중... Updating lunch...' });
+  if (!data) return;
+  if (apiFail(data)) return;
+  toast((name || '') + '님 점심이 "' + (lunch === 'Y' ? '먹음' : '안먹음') + '"으로 수정되었습니다. / Lunch updated to "' + (lunch === 'Y' ? 'Yes' : 'No') + '".');
+  loadDash();
+}
+
+/* ---------------------------------------------------------
  * 7-1. 관리자: 대시보드 카드 → 상세 모달
  * --------------------------------------------------------- */
 function lunchPillHtml(lv) {
   return isLunchYes(lv) ? '<span class="pill y">먹음/Yes</span>'
     : isLunchNo(lv) ? '<span class="pill n">안먹음/No</span>'
-      : '<span class="pill gray">-</span>';
+    : '<span class="pill gray">-</span>';
 }
 
 function checkedInTableHtml(rows) {
@@ -887,7 +936,10 @@ $all('#lunch-pre button').forEach(b => {
 });
 $('#btn-checkin').addEventListener('click', doCheckIn);
 $all('#lunch-post button').forEach(b => {
-  b.addEventListener('click', () => changeLunch(b.dataset.v));
+  b.addEventListener('click', () => {
+    if (b.disabled) return;
+    changeLunch(b.dataset.v);
+  });
 });
 $('#main-logout').addEventListener('click', () => { currentMaid = null; loadNameGrid(); });
 
@@ -919,6 +971,12 @@ $('#detail-modal').addEventListener('click', e => {
 });
 
 $('#cal-search').addEventListener('click', searchCalDate);
+
+$('#tbl-in').addEventListener('click', e => {
+  const b = e.target.closest('button[data-lunch-edit]');
+  if (!b) return;
+  adminEditLunch(b.dataset.id, b.dataset.lunchEdit, b.dataset.name);
+});
 
 $('#btn-add-maid').addEventListener('click', addMaid);
 $('#new-maid-name').addEventListener('keydown', e => { if (e.key === 'Enter') addMaid(); });
