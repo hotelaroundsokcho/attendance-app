@@ -1,936 +1,1004 @@
-/**
- * 호텔어라운드 속초 - 메이드 출근확인 및 점심식사 확인 앱 백엔드
- * Google Apps Script (Web App)
+/* ============================================================
+ * 호텔어라운드 속초 - 메이드 출근확인 및 점심식사 확인 앱
+ * Hotel Around Sokcho - Maid Check-In & Lunch App
+ * app.js (독립 프론트엔드 / Apps Script 백엔드 연동)
+ * 모든 사용자 문구 한영 병기 (Korean/English bilingual UI)
  *
- * 시트 구성 (자동 생성됨):
- *  - maids      : 메이드 명단 및 인증 정보
- *  - attendance : 일별 출근/점심 기록 (영구 누적)
- *  - admins     : 관리자 계정
- *
- * [2026-07-11 정책 변경]
- *  - 출근을 점심 선택보다 우선한다 (점심 미선택이어도 출근 가능)
- *  - 점심은 13:00까지 메이드가 직접 선택/변경 가능
- *  - 13:00까지 무입력이면 자동으로 '안먹음(N)'으로 확정
- *  - 13:00 이후에는 메이드는 변경 불가, 관리자만 adminUpdateLunch로 수정 가능
- */
+ * [2026-07-11 정책 변경 반영]
+ * - 출근이 점심 선택보다 우선한다 (점심 미선택이어도 출근 가능)
+ * - 점심은 13:00까지 메이드가 직접 선택/변경 가능
+ * - 13:00 이후에는 메이드 직접 변경 불가, 관리자만 adminUpdateLunch로 수정 가능
+ * ============================================================ */
 
-// ===================== 공통 상수 =====================
+const CONFIG = {
+  API_URL: 'https://script.google.com/macros/s/AKfycbwXkuzb1Sl-YsVBiBQn6SNJ7yYEuSlldFsU5IiRBNHotlyC6c7ZKfU0ZftmRZN-EOc7/exec',
+  DEVICE_TOKEN_KEY: 'attn_device_token',
+  ADMIN_TOKEN_KEY: 'attn_admin_token',
+  ADMIN_USER_KEY: 'attn_admin_user',
+  ADMIN_ROLE_KEY: 'attn_admin_role',
+  SLOW_MS: 1200
+};
 
-const SHEET_MAIDS = 'maids';
-const SHEET_ATTENDANCE = 'attendance';
-const SHEET_ADMINS = 'admins';
+/* ---------------------------------------------------------
+ * 0. 유틸: 기기 토큰, DOM 헬퍼, 토스트, 로딩 오버레이
+ * --------------------------------------------------------- */
+function getDeviceToken() {
+  let t = localStorage.getItem(CONFIG.DEVICE_TOKEN_KEY);
+  if (!t) {
+    t = (crypto.randomUUID ? crypto.randomUUID() : (Date.now() + '-' + Math.random().toString(16).slice(2)));
+    localStorage.setItem(CONFIG.DEVICE_TOKEN_KEY, t);
+  }
+  return t;
+}
 
-const TIMEZONE = 'Asia/Seoul';
-const SESSION_TTL_SEC = 21600; // CacheService 최대치 6시간
+const $ = (sel, root) => (root || document).querySelector(sel);
+const $all = (sel, root) => Array.from((root || document).querySelectorAll(sel));
 
-const DEFAULT_MASTER_USERNAME = 'master';
-const DEFAULT_MASTER_PASSWORD = 'master1234';
+function showScreen(id) {
+  $all('.screen').forEach(s => s.classList.remove('on'));
+  const el = document.getElementById(id);
+  if (el) el.classList.add('on');
+  window.scrollTo(0, 0);
+}
 
-const LUNCH_DEADLINE_HOUR = 13; // 13:00 이후 메이드 직접 변경 불가 (관리자만 가능)
-const LUNCH_AUTOLOCK_CACHE_TTL_SEC = 300; // 마감 자동처리 스윕 주기 (5분에 1회)
+let toastTimer = null;
+function toast(msg) {
+  const el = $('#toast');
+  el.textContent = msg;
+  el.classList.add('on');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove('on'), 3200);
+}
 
-// ===================== 엔트리 포인트 =====================
+let overlaySlowTimer = null;
+let overlayDepth = 0;
+function showOverlay(msg) {
+  overlayDepth++;
+  const ov = $('#overlay');
+  $('.msg', ov).textContent = msg || '처리 중... Processing...';
+  ov.classList.remove('slow');
+  ov.classList.add('on');
+  clearTimeout(overlaySlowTimer);
+  overlaySlowTimer = setTimeout(() => ov.classList.add('slow'), CONFIG.SLOW_MS);
+}
+function hideOverlay() {
+  overlayDepth = Math.max(0, overlayDepth - 1);
+  if (overlayDepth === 0) {
+    clearTimeout(overlaySlowTimer);
+    $('#overlay').classList.remove('on', 'slow');
+  }
+}
 
-function doPost(e) {
-  var result;
+function escapeHtml(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+/* ---------------------------------------------------------
+ * 1. 에러 코드 -> 사용자 메시지 매핑 (한영 병기)
+ * --------------------------------------------------------- */
+const ERR_MSG = {
+  EMPTY_REQUEST: '요청이 비어 있습니다. 다시 시도해 주세요. / The request was empty. Please try again.',
+  UNKNOWN_ACTION: '알 수 없는 요청입니다. / Unknown request.',
+  SERVER_ERROR: '서버 오류가 발생했습니다. 잠시 후 다시 시도해 주세요. / A server error occurred. Please try again shortly.',
+  NO_TOKEN: '로그인이 필요합니다. / Please sign in.',
+  SESSION_EXPIRED: '로그인이 만료되었습니다. 다시 로그인해 주세요. / Your session expired. Please sign in again.',
+  MISSING_FIELDS: '필요한 정보가 빠졌습니다. 모두 입력해 주세요. / Some required information is missing. Please fill in everything.',
+  INVALID_PIN_FORMAT: 'PIN은 숫자 4자리여야 합니다. / The PIN must be exactly 4 digits.',
+  MAID_NOT_FOUND: '명단에서 이름을 찾을 수 없습니다. / Your name was not found in the list.',
+  MAID_NOT_ACTIVE: '사용이 중지된 이름입니다. 관리자에게 문의해 주세요. / This name is deactivated. Please contact the manager.',
+  ALREADY_REGISTERED: '이미 PIN이 등록되어 있습니다. PIN을 입력해 주세요. / A PIN is already registered. Please enter your PIN.',
+  NOT_REGISTERED: '아직 PIN이 등록되지 않았습니다. 먼저 PIN을 만들어 주세요. / No PIN registered yet. Please create your PIN first.',
+  WRONG_PIN: 'PIN이 올바르지 않습니다. / Incorrect PIN.',
+  DEVICE_MISMATCH: '처음 등록한 폰이 아닙니다. 관리자에게 PIN 초기화를 요청해 주세요. / This is not your original phone. Please ask the manager to reset your PIN.',
+  ALREADY_CHECKED_IN: '오늘은 이미 출근 처리되었습니다. / You have already checked in today.',
+  NOT_CHECKED_IN_TODAY: '오늘 출근 기록이 없습니다. 먼저 출근해 주세요. / No check-in record today. Please check in first.',
+  LUNCH_LOCKED: '점심 변경 마감(13:00)이 지났습니다. 변경이 필요하면 관리자에게 문의해 주세요. / The 13:00 lunch deadline has passed. Please contact the manager if you need a change.',
+  ADMIN_NOT_FOUND: '관리자 계정을 찾을 수 없습니다. / Manager account not found.',
+  WRONG_PASSWORD: '비밀번호가 올바르지 않습니다. / Incorrect password.',
+  MISSING_NAME: '이름을 입력해 주세요. / Please enter a name.',
+  MASTER_ONLY: '마스터 관리자만 할 수 있는 작업입니다. / Only the master admin can do this.',
+  USERNAME_TAKEN: '이미 사용 중인 아이디입니다. / This username is already in use.',
+  CANNOT_DELETE_SELF: '자기 자신은 삭제할 수 없습니다. / You cannot delete your own account.',
+  CANNOT_DELETE_MASTER: '마스터 계정은 삭제할 수 없습니다. / The master account cannot be deleted.',
+  ALREADY_MASTER: '이미 마스터 권한을 가지고 있습니다. / This account is already the master.',
+  TARGET_NOT_FOUND: '대상 계정을 찾을 수 없습니다. / Target account not found.',
+  SELF_NOT_FOUND: '내 계정 정보를 찾을 수 없습니다. 다시 로그인해 주세요. / Your account was not found. Please sign in again.'
+};
+function errMsg(code) {
+  return ERR_MSG[code] || ('오류가 발생했습니다 (' + code + '). / An error occurred (' + code + ').');
+}
+
+/* ---------------------------------------------------------
+ * 2. API 래퍼 (Apps Script: text/plain POST로 preflight 회피)
+ * --------------------------------------------------------- */
+async function api(payload, opt) {
+  opt = opt || {};
+  if (!opt.silent) showOverlay(opt.msg);
   try {
-    ensureSheetsExist();
-    ensureMasterAdminExists();
-    enforcePlainTextFormats();
-    autoLockPastDueLunches();
+    const res = await fetch(CONFIG.API_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'text/plain' },
+      body: JSON.stringify(payload)
+    });
+    const data = await res.json();
+    return data;
+  } catch (e) {
+    return { success: false, error: 'NETWORK', _detail: String(e) };
+  } finally {
+    if (!opt.silent) hideOverlay();
+  }
+}
+function apiFail(data) {
+  if (!data) { toast('응답이 없습니다. / No response.'); return true; }
+  if (data.success) return false;
+  if (data.error === 'NETWORK') {
+    toast('네트워크 연결을 확인해 주세요. / Please check your network connection.');
+    return true;
+  }
+  toast(errMsg(data.error));
+  return true;
+}
 
-    if (!e || !e.postData || !e.postData.contents) {
-      return jsonResponse({ success: false, error: 'EMPTY_REQUEST' });
+/* ---------------------------------------------------------
+ * 3. 메이드: 이름 선택
+ * --------------------------------------------------------- */
+async function loadNameGrid() {
+  const data = await api({ action: 'getMaidList' }, { msg: '명단을 불러오는 중... Loading names...' });
+  if (apiFail(data)) return;
+  const grid = $('#name-grid');
+  grid.innerHTML = '';
+  const maids = data.maids || [];
+  $('#name-empty').style.display = maids.length ? 'none' : 'block';
+  maids.forEach(m => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = m.name;
+    b.addEventListener('click', () => openPinScreen(m));
+    grid.appendChild(b);
+  });
+  showScreen('scr-name');
+}
+
+/* ---------------------------------------------------------
+ * 4. 메이드: PIN 등록 / 입력 / 재설정
+ * --------------------------------------------------------- */
+let currentMaid = null; // {maidId, name, hasPin}
+let pinMode = null; // 'register' | 'login' | 'reset'
+
+function setupPinBoxes() {
+  ['#pin-box1', '#pin-box2'].forEach(boxSel => {
+    const inputs = $all('input', $(boxSel));
+    inputs.forEach((inp, i) => {
+      inp.addEventListener('input', () => {
+        inp.value = inp.value.replace(/\D/g, '').slice(0, 1);
+        if (inp.value && i < inputs.length - 1) inputs[i + 1].focus();
+      });
+      inp.addEventListener('keydown', e => {
+        if (e.key === 'Backspace' && !inp.value && i > 0) inputs[i - 1].focus();
+      });
+    });
+  });
+}
+function readPin(boxSel) {
+  return $all('input', $(boxSel)).map(i => i.value).join('');
+}
+function clearPins() {
+  $all('#pin-box1 input, #pin-box2 input').forEach(i => { i.value = ''; });
+  $('#pin-err').textContent = '';
+}
+function focusFirstPin() {
+  const first = $('#pin-box1 input');
+  if (first) first.focus();
+}
+
+function openPinScreen(maid) {
+  currentMaid = maid;
+  pinMode = maid.hasPin ? 'login' : 'register';
+  renderPinScreen();
+  showScreen('scr-pin');
+  focusFirstPin();
+}
+
+function renderPinScreen() {
+  clearPins();
+  const name = escapeHtml(currentMaid.name);
+  if (pinMode === 'register') {
+    $('#pin-title').innerHTML = name + '님, 처음 오셨네요!<span class="en">Welcome, ' + name + '!</span>';
+    $('#pin-sub').innerHTML = '앞으로 사용할 비밀번호(PIN) 4자리를 만들어 주세요.<span class="en">Please create a 4-digit PIN to use from now on.</span>';
+    $('#pin-confirm-wrap').style.display = 'block';
+    $('#pin-reset-link').style.display = 'none';
+  } else if (pinMode === 'login') {
+    $('#pin-title').innerHTML = name + '님, 안녕하세요!<span class="en">Hello, ' + name + '!</span>';
+    $('#pin-sub').innerHTML = '비밀번호(PIN) 4자리를 입력해 주세요.<span class="en">Please enter your 4-digit PIN.</span>';
+    $('#pin-confirm-wrap').style.display = 'none';
+    $('#pin-reset-link').style.display = 'block';
+  } else { // reset
+    $('#pin-title').innerHTML = 'PIN 다시 만들기<span class="en">Reset your PIN</span>';
+    $('#pin-sub').innerHTML = '새로 사용할 PIN 4자리를 입력해 주세요. (처음 등록했던 폰에서만 가능)<span class="en">Enter a new 4-digit PIN. (Only possible on your original phone.)</span>';
+    $('#pin-confirm-wrap').style.display = 'block';
+    $('#pin-reset-link').style.display = 'none';
+  }
+}
+
+async function submitPin() {
+  const pin1 = readPin('#pin-box1');
+  if (pin1.length !== 4) {
+    $('#pin-err').textContent = '숫자 4자리를 모두 입력해 주세요. / Please enter all 4 digits.';
+    return;
+  }
+  if (pinMode === 'register' || pinMode === 'reset') {
+    const pin2 = readPin('#pin-box2');
+    if (pin1 !== pin2) {
+      $('#pin-err').textContent = '두 번 입력한 PIN이 서로 다릅니다. / The two PINs do not match.';
+      return;
     }
+  }
+  $('#pin-err').textContent = '';
 
-    var body = JSON.parse(e.postData.contents);
-    var action = body.action;
-
-    switch (action) {
-      // ---- 메이드 ----
-      case 'getMaidList':
-        result = handleGetMaidList();
-        break;
-      case 'registerMaid':
-        result = handleRegisterMaid(body);
-        break;
-      case 'loginMaid':
-        result = handleLoginMaid(body);
-        break;
-      case 'resetPin':
-        result = handleResetPin(body);
-        break;
-      case 'checkStatusToday':
-        result = handleCheckStatusToday(body);
-        break;
-      case 'checkIn':
-        result = handleCheckIn(body);
-        break;
-      case 'updateLunch':
-        result = handleUpdateLunch(body);
-        break;
-
-      // ---- 관리자 인증 ----
-      case 'adminLogin':
-        result = handleAdminLogin(body);
-        break;
-      case 'adminChangeOwnPassword':
-        result = withAdminAuth(body, function (admin) {
-          return handleAdminChangeOwnPassword(admin, body);
-        });
-        break;
-
-      // ---- 관리자: 대시보드 ----
-      case 'adminGetDashboard':
-        result = withAdminAuth(body, function (admin) {
-          return handleAdminGetDashboard();
-        });
-        break;
-
-      // ---- 관리자: 점심 수정 (13:00 마감 이후에도 항상 허용) ----
-      case 'adminUpdateLunch':
-        result = withAdminAuth(body, function (admin) {
-          return handleAdminUpdateLunch(body);
-        });
-        break;
-
-      // ---- 관리자: 메이드 관리 ----
-      case 'adminGetMaidList':
-        result = withAdminAuth(body, function (admin) {
-          return handleAdminGetMaidList();
-        });
-        break;
-      case 'adminAddMaid':
-        result = withAdminAuth(body, function (admin) {
-          return handleAdminAddMaid(body);
-        });
-        break;
-      case 'adminEditMaid':
-        result = withAdminAuth(body, function (admin) {
-          return handleAdminEditMaid(body);
-        });
-        break;
-      case 'adminDeleteMaid':
-        result = withAdminAuth(body, function (admin) {
-          return handleAdminDeleteMaid(body);
-        });
-        break;
-      case 'adminResetMaidPin':
-        result = withAdminAuth(body, function (admin) {
-          return handleAdminResetMaidPin(body);
-        });
-        break;
-
-      // ---- 관리자: 관리자 계정 관리 (마스터 전용) ----
-      case 'adminGetAdminList':
-        result = withAdminAuth(body, function (admin) {
-          return handleAdminGetAdminList();
-        });
-        break;
-      case 'adminAddAdmin':
-        result = withAdminAuth(body, function (admin) {
-          return handleAdminAddAdmin(admin, body);
-        });
-        break;
-      case 'adminDeleteAdmin':
-        result = withAdminAuth(body, function (admin) {
-          return handleAdminDeleteAdmin(admin, body);
-        });
-        break;
-      case 'adminTransferMaster':
-        result = withAdminAuth(body, function (admin) {
-          return handleAdminTransferMaster(admin, body);
-        });
-        break;
-
-      // ---- 관리자: 정산용 데이터 내보내기 ----
-      case 'adminExportRange':
-        result = withAdminAuth(body, function (admin) {
-          return handleAdminExportRange(body);
-        });
-        break;
-
-      default:
-        result = { success: false, error: 'UNKNOWN_ACTION' };
+  if (pinMode === 'register') {
+    const data = await api({
+      action: 'registerMaid',
+      maidId: currentMaid.maidId,
+      pin: pin1,
+      deviceToken: getDeviceToken()
+    }, { msg: 'PIN 등록 중... Registering PIN...' });
+    if (data.success) {
+      toast('PIN이 등록되었습니다. / Your PIN has been registered.');
+      currentMaid.hasPin = true;
+      enterMain();
+    } else if (data.error === 'ALREADY_REGISTERED') {
+      toast(errMsg(data.error));
+      pinMode = 'login'; renderPinScreen(); focusFirstPin();
+    } else {
+      apiFail(data); clearPins(); focusFirstPin();
     }
-  } catch (err) {
-    result = { success: false, error: 'SERVER_ERROR', message: String(err && err.message ? err.message : err) };
-  }
-
-  return jsonResponse(result);
-}
-
-function doGet(e) {
-  return jsonResponse({ success: true, message: 'Hotel Around Sokcho 출근관리 API is running.' });
-}
-
-function jsonResponse(obj) {
-  return ContentService.createTextOutput(JSON.stringify(obj))
-    .setMimeType(ContentService.MimeType.JSON);
-}
-
-// ===================== 시트 초기화 =====================
-
-function ensureSheetsExist() {
-  var ss = SpreadsheetApp.getActiveSpreadsheet();
-
-  if (!ss.getSheetByName(SHEET_MAIDS)) {
-    var maidsSheet = ss.insertSheet(SHEET_MAIDS);
-    maidsSheet.appendRow([
-      'maidId', 'name', 'status', 'pinHash', 'pinSalt',
-      'deviceTokenHash', 'registeredAt', 'createdAt', 'deletedAt'
-    ]);
-  }
-
-  if (!ss.getSheetByName(SHEET_ATTENDANCE)) {
-    var attSheet = ss.insertSheet(SHEET_ATTENDANCE);
-    attSheet.appendRow([
-      'recordId', 'date', 'maidId', 'maidName',
-      'checkInTime', 'lunch', 'lunchUpdatedAt', 'createdAt'
-    ]);
-  }
-
-  if (!ss.getSheetByName(SHEET_ADMINS)) {
-    var adminSheet = ss.insertSheet(SHEET_ADMINS);
-    adminSheet.appendRow([
-      'adminId', 'username', 'passwordHash', 'passwordSalt', 'role', 'createdAt'
-    ]);
-  }
-
-  // 기본 '시트1' 빈 탭이 남아있으면 정리(다른 탭이 최소 1개 이상 있을 때만)
-  var blank = ss.getSheetByName('시트1');
-  if (blank && ss.getSheets().length > 1 && blank.getLastRow() === 0) {
-    ss.deleteSheet(blank);
+  } else if (pinMode === 'login') {
+    const data = await api({
+      action: 'loginMaid',
+      maidId: currentMaid.maidId,
+      pin: pin1
+    }, { msg: '확인 중... Checking...' });
+    if (data.success) {
+      enterMain();
+    } else if (data.error === 'NOT_REGISTERED') {
+      toast(errMsg(data.error));
+      pinMode = 'register'; renderPinScreen(); focusFirstPin();
+    } else {
+      apiFail(data); clearPins(); focusFirstPin();
+    }
+  } else { // reset
+    const data = await api({
+      action: 'resetPin',
+      maidId: currentMaid.maidId,
+      deviceToken: getDeviceToken(),
+      newPin: pin1
+    }, { msg: 'PIN 변경 중... Updating PIN...' });
+    if (data.success) {
+      toast('새 PIN이 저장되었습니다. / Your new PIN has been saved.');
+      pinMode = 'login'; renderPinScreen(); focusFirstPin();
+    } else {
+      apiFail(data); clearPins(); focusFirstPin();
+    }
   }
 }
 
-function ensureMasterAdminExists() {
-  var sheet = getSheet(SHEET_ADMINS);
-  var data = sheet.getDataRange().getValues();
-  var hasMaster = false;
-  for (var i = 1; i < data.length; i++) {
-    if (data[i][4] === 'master') { hasMaster = true; break; }
+/* ---------------------------------------------------------
+ * 5. 메이드: 메인 (출근 / 점심)
+ * --------------------------------------------------------- */
+let preLunch = null; // 출근 전 선택한 점심 값 'Y' | 'N' | null(미선택)
+
+function todayLabel() {
+  const d = new Date();
+  const ko = d.toLocaleDateString('ko-KR', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'short' });
+  const en = d.toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric', weekday: 'short' });
+  return ko + ' · ' + en;
+}
+function isLunchYes(v) { return v === 'Y' || v === '먹음' || v === '먹어요'; }
+function isLunchNo(v) { return v === 'N' || v === '안먹음' || v === '안 먹어요'; }
+function lunchLabel(v) {
+  if (isLunchYes(v)) return '먹음/Yes';
+  if (isLunchNo(v)) return '안먹음/No';
+  return '-';
+}
+
+async function enterMain() {
+  $('#main-name').textContent = currentMaid.name;
+  $('#main-date').textContent = todayLabel();
+  const data = await api({ action: 'checkStatusToday', maidId: currentMaid.maidId }, { msg: '오늘 기록 확인 중... Checking today...' });
+  if (apiFail(data)) { showScreen('scr-name'); return; }
+  if (data.checkedIn) {
+    renderAfterCheckin(data.checkInTime, data.lunch, data.lunchUpdatedAt, data.lunchLocked);
+  } else {
+    preLunch = null;
+    paintLunchToggle('#lunch-pre', null);
+    $('#before-checkin').style.display = 'block';
+    $('#after-checkin').style.display = 'none';
+    renderPrecheckinNotice(data.lunchLocked);
   }
-  if (!hasMaster && data.length <= 1) {
-    var salt = Utilities.getUuid();
-    var hash = hashValue(DEFAULT_MASTER_PASSWORD, salt);
-    sheet.appendRow([
-      Utilities.getUuid(), DEFAULT_MASTER_USERNAME, hash, salt, 'master', nowIso()
-    ]);
+  showScreen('scr-main');
+}
+
+function renderPrecheckinNotice(lunchLocked) {
+  const el = $('#precheckin-notice');
+  if (lunchLocked) {
+    el.className = 'notice locked';
+    el.innerHTML = '⚠ 이미 13:00이 지났습니다. 지금 점심을 정하지 않으면 자동으로 "안 먹어요"로 처리돼요.<span class="en">It is already past 13:00. If you do not choose now, lunch will automatically be set to "No".</span>';
+  } else {
+    el.className = 'notice';
+    el.innerHTML = '점심을 아직 정하지 않았어도 출근할 수 있어요. 점심은 13:00까지 언제든 정하거나 바꿀 수 있습니다.<span class="en">You can check in even without choosing lunch yet. You can pick or change it anytime until 13:00.</span>';
   }
 }
 
-// ===================== 유틸리티 =====================
-
-function getSheet(name) {
-  return SpreadsheetApp.getActiveSpreadsheet().getSheetByName(name);
+function paintLunchToggle(sel, v) {
+  $all('button', $(sel)).forEach(b => {
+    b.classList.remove('on-y', 'on-n');
+    if (v && b.dataset.v === v) b.classList.add(v === 'Y' ? 'on-y' : 'on-n');
+  });
 }
 
-function nowIso() {
-  return Utilities.formatDate(new Date(), TIMEZONE, "yyyy-MM-dd'T'HH:mm:ss");
+function renderAfterCheckin(checkInTime, lunch, lunchUpdatedAt, lunchLocked) {
+  $('#before-checkin').style.display = 'none';
+  $('#after-checkin').style.display = 'block';
+  $('#done-time').textContent = checkInTime || '';
+  const v = isLunchYes(lunch) ? 'Y' : (isLunchNo(lunch) ? 'N' : null);
+  paintLunchToggle('#lunch-post', v);
+
+  const postButtons = $all('#lunch-post button');
+  const noticeEl = $('#lunch-notice');
+  if (lunchLocked) {
+    postButtons.forEach(b => { b.disabled = true; });
+    noticeEl.className = 'notice locked';
+    noticeEl.innerHTML = '🔒&nbsp;13:00&nbsp;마감으로&nbsp;더&nbsp;이상&nbsp;직접&nbsp;변경할&nbsp;수&nbsp;없어요.<br>변경이 필요하면 관리자에게 문의해 주세요.<span class="en">The 13:00 deadline has passed — you can no longer change this yourself. Please contact the manager if you need a change.</span>';
+  } else {
+    postButtons.forEach(b => { b.disabled = false; });
+    noticeEl.className = 'notice';
+    noticeEl.innerHTML = '점심은 13:00까지 언제든 바꿀 수 있어요.<span class="en">You can change your lunch anytime until 13:00.</span>';
+  }
+
+  $('#lunch-updated').textContent = lunchUpdatedAt
+    ? ('마지막 변경 Last change: ' + lunchUpdatedAt)
+    : '';
 }
 
-function todayKey() {
-  return Utilities.formatDate(new Date(), TIMEZONE, 'yyyy-MM-dd');
+async function doCheckIn() {
+  // 정책 변경: 점심 미선택이어도 출근 가능. preLunch가 없으면 빈 값으로 전송한다.
+  const data = await api({
+    action: 'checkIn',
+    maidId: currentMaid.maidId,
+    lunch: preLunch || ''
+  }, { msg: '출근 처리 중... Checking in...' });
+  if (data.success) {
+    toast('출근이 완료되었습니다! / You are checked in!');
+    renderAfterCheckin(data.checkInTime, data.lunch, null, data.lunchLocked);
+  } else if (data.error === 'ALREADY_CHECKED_IN') {
+    toast(errMsg(data.error));
+    enterMain();
+  } else {
+    apiFail(data);
+  }
 }
 
-function nowTimeOnly() {
-  return Utilities.formatDate(new Date(), TIMEZONE, 'HH:mm:ss');
+async function changeLunch(v) {
+  const data = await api({
+    action: 'updateLunch',
+    maidId: currentMaid.maidId,
+    lunch: v
+  }, { msg: '점심 변경 중... Updating lunch...' });
+  if (data.success) {
+    toast('점심 선택이 변경되었습니다. / Your lunch choice has been updated.');
+    paintLunchToggle('#lunch-post', v);
+    $('#lunch-updated').textContent = data.lunchUpdatedAt
+      ? ('마지막 변경 Last change: ' + data.lunchUpdatedAt)
+      : '';
+  } else if (data.error === 'NOT_CHECKED_IN_TODAY') {
+    toast(errMsg(data.error));
+    enterMain();
+  } else if (data.error === 'LUNCH_LOCKED') {
+    // 마감 이후 상태를 화면에도 반영 (재조회하여 잠금 UI로 갱신)
+    toast(errMsg(data.error));
+    enterMain();
+  } else {
+    apiFail(data);
+  }
 }
 
-function hashValue(value, salt) {
-  var digest = Utilities.computeDigest(
-    Utilities.DigestAlgorithm.SHA_256,
-    String(value) + '::' + String(salt)
+/* ---------------------------------------------------------
+ * 6. 관리자: 로그인 / 세션
+ * --------------------------------------------------------- */
+function admToken() { return sessionStorage.getItem(CONFIG.ADMIN_TOKEN_KEY) || ''; }
+function admUser() { return sessionStorage.getItem(CONFIG.ADMIN_USER_KEY) || ''; }
+function admRole() { return sessionStorage.getItem(CONFIG.ADMIN_ROLE_KEY) || ''; }
+
+function backToLoginOnExpire() {
+  sessionStorage.removeItem(CONFIG.ADMIN_TOKEN_KEY);
+  sessionStorage.removeItem(CONFIG.ADMIN_USER_KEY);
+  sessionStorage.removeItem(CONFIG.ADMIN_ROLE_KEY);
+  $('#whoami').textContent = '';
+  toast(errMsg('SESSION_EXPIRED'));
+  showScreen('scr-admin-login');
+}
+function handleAdminErr(data) {
+  if (data && (data.error === 'NO_TOKEN' || data.error === 'SESSION_EXPIRED')) {
+    backToLoginOnExpire();
+    return true;
+  }
+  return false;
+}
+async function adminApi(payload, opt) {
+  payload.token = admToken();
+  const data = await api(payload, opt);
+  if (handleAdminErr(data)) return null;
+  return data;
+}
+
+async function adminLogin() {
+  const username = $('#adm-id').value.trim();
+  const password = $('#adm-pw').value;
+  if (!username || !password) {
+    toast('아이디와 비밀번호를 입력해 주세요. / Please enter your username and password.');
+    return;
+  }
+  const data = await api({ action: 'adminLogin', username, password }, { msg: '로그인 중... Signing in...' });
+  if (apiFail(data)) return;
+  sessionStorage.setItem(CONFIG.ADMIN_TOKEN_KEY, data.token);
+  sessionStorage.setItem(CONFIG.ADMIN_USER_KEY, data.username || username);
+  sessionStorage.setItem(CONFIG.ADMIN_ROLE_KEY, data.role || '');
+  $('#adm-pw').value = '';
+  showAdmin();
+}
+
+function adminLogout() {
+  sessionStorage.removeItem(CONFIG.ADMIN_TOKEN_KEY);
+  sessionStorage.removeItem(CONFIG.ADMIN_USER_KEY);
+  sessionStorage.removeItem(CONFIG.ADMIN_ROLE_KEY);
+  $('#whoami').textContent = '';
+  toast('로그아웃되었습니다. / Signed out.');
+  loadNameGrid();
+}
+
+function showAdmin() {
+  $('#whoami').textContent = admUser() + (admRole() === 'master' ? ' (master)' : '');
+  switchTab('dash');
+  showScreen('scr-admin');
+  loadDash();
+}
+
+/* ---------------------------------------------------------
+ * 7. 관리자: 탭 / 현황 대시보드
+ * --------------------------------------------------------- */
+function switchTab(name) {
+  $all('.tabs button').forEach(b => b.classList.toggle('on', b.dataset.tab === name));
+  ['dash', 'maids', 'admins', 'export'].forEach(t => {
+    $('#tab-' + t).style.display = (t === name) ? 'block' : 'none';
+  });
+  if (name === 'dash') { loadDash(); initCalDate(); }
+  if (name === 'maids') loadMaids();
+  if (name === 'admins') loadAdmins();
+  if (name === 'export') initExportDates();
+}
+
+let lastDashData = null;
+
+async function loadDash() {
+  const data = await adminApi({ action: 'adminGetDashboard' }, { msg: '현황 불러오는 중... Loading status...' });
+  if (!data) return;
+  if (apiFail(data)) return;
+  lastDashData = data;
+  $('#st-total').textContent = data.totalMaids != null ? data.totalMaids : '-';
+  $('#st-in').textContent = data.checkedInCount != null ? data.checkedInCount : '-';
+  $('#st-y').textContent = data.lunchYes != null ? data.lunchYes : '-';
+  $('#st-n').textContent = data.lunchNo != null ? data.lunchNo : '-';
+
+  $('#dash-lunch-lock-notice').style.display = data.lunchLocked ? 'block' : 'none';
+
+  const inBody = $('#tbl-in tbody');
+  inBody.innerHTML = '';
+  (data.checkedInList || []).forEach(r => {
+    const tr = document.createElement('tr');
+    const lv = r.lunch;
+    const pill = isLunchYes(lv) ? '<span class="pill y">먹음/Yes</span>'
+      : isLunchNo(lv) ? '<span class="pill n">안먹음/No</span>'
+      : '<span class="pill gray">-</span>';
+    tr.innerHTML = '<td>' + escapeHtml(r.name || r.maidName) + '</td>'
+      + '<td>' + escapeHtml(r.checkInTime || '') + '</td>'
+      + '<td>' + pill + '</td>'
+      + '<td>' + escapeHtml(r.lunchUpdatedAt || '') + '</td>'
+      + '<td><div class="row-actions">'
+      + '<button class="btn small" data-lunch-edit="Y" data-id="' + r.maidId + '" data-name="' + escapeHtml(r.name || r.maidName) + '">먹음<span class="en">Yes</span></button>'
+      + '<button class="btn small danger" data-lunch-edit="N" data-id="' + r.maidId + '" data-name="' + escapeHtml(r.name || r.maidName) + '">안먹음<span class="en">No</span></button>'
+      + '</div></td>';
+    inBody.appendChild(tr);
+  });
+  if (!(data.checkedInList || []).length) {
+    inBody.innerHTML = '<tr><td colspan="5" class="notice">아직 출근한 메이드가 없습니다. / No one has checked in yet.</td></tr>';
+  }
+
+  const outBody = $('#tbl-out tbody');
+  outBody.innerHTML = '';
+  (data.notCheckedInList || []).forEach(r => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td>' + escapeHtml(r.name || r.maidName) + '</td>';
+    outBody.appendChild(tr);
+  });
+  if (!(data.notCheckedInList || []).length) {
+    outBody.innerHTML = '<tr><td class="notice">미출근 인원이 없습니다. / Everyone has checked in.</td></tr>';
+  }
+}
+
+/* ---------------------------------------------------------
+ * 7-0. 관리자: 대시보드에서 점심 값 직접 수정 (13:00 마감 이후에도 항상 허용)
+ * --------------------------------------------------------- */
+async function adminEditLunch(maidId, lunch, name) {
+  const data = await adminApi({ action: 'adminUpdateLunch', maidId, lunch }, { msg: (name || '') + ' 점심 수정 중... Updating lunch...' });
+  if (!data) return;
+  if (apiFail(data)) return;
+  toast((name || '') + '님 점심이 "' + (lunch === 'Y' ? '먹음' : '안먹음') + '"으로 수정되었습니다. / Lunch updated to "' + (lunch === 'Y' ? 'Yes' : 'No') + '".');
+  loadDash();
+}
+
+/* ---------------------------------------------------------
+ * 7-1. 관리자: 대시보드 카드 → 상세 모달
+ * --------------------------------------------------------- */
+function lunchPillHtml(lv) {
+  return isLunchYes(lv) ? '<span class="pill y">먹음/Yes</span>'
+    : isLunchNo(lv) ? '<span class="pill n">안먹음/No</span>'
+    : '<span class="pill gray">-</span>';
+}
+
+function checkedInTableHtml(rows) {
+  if (!rows.length) return '<p class="notice" style="text-align:left">해당하는 인원이 없습니다. / No one matches.</p>';
+  let html = '<table class="list"><thead><tr><th>이름 <span class="slash-en">Name</span></th><th>출근 <span class="slash-en">In</span></th><th>점심 <span class="slash-en">Lunch</span></th><th>점심변경 <span class="slash-en">Updated</span></th></tr></thead><tbody>';
+  rows.forEach(r => {
+    html += '<tr><td>' + escapeHtml(r.name || r.maidName) + '</td><td>' + escapeHtml(r.checkInTime || '') + '</td><td>' + lunchPillHtml(r.lunch) + '</td><td>' + escapeHtml(r.lunchUpdatedAt || '') + '</td></tr>';
+  });
+  return html + '</tbody></table>';
+}
+
+function openDetailModal(titleHtml, bodyHtml) {
+  $('#detail-title').innerHTML = titleHtml;
+  $('#detail-body').innerHTML = bodyHtml;
+  $('#detail-modal').classList.add('on');
+}
+function closeDetailModal() {
+  $('#detail-modal').classList.remove('on');
+}
+
+function showDashDetail(key) {
+  if (!lastDashData) {
+    toast('현황을 아직 불러오는 중입니다. 잠시 후 다시 시도해 주세요. / Status is still loading. Please try again shortly.');
+    return;
+  }
+  const checkedIn = lastDashData.checkedInList || [];
+  const notIn = lastDashData.notCheckedInList || [];
+
+  if (key === 'total') {
+    let html = '<table class="list"><thead><tr><th>이름 <span class="slash-en">Name</span></th><th>상태 <span class="slash-en">Status</span></th></tr></thead><tbody>';
+    checkedIn.forEach(r => {
+      html += '<tr><td>' + escapeHtml(r.name || r.maidName) + '</td><td><span class="pill y">출근/In</span></td></tr>';
+    });
+    notIn.forEach(r => {
+      html += '<tr><td>' + escapeHtml(r.name || r.maidName) + '</td><td><span class="pill gray">미출근/Not in</span></td></tr>';
+    });
+    html += '</tbody></table>';
+    if (!checkedIn.length && !notIn.length) html = '<p class="notice" style="text-align:left">등록된 메이드가 없습니다. / No maids registered.</p>';
+    openDetailModal('전체 메이드 (' + (checkedIn.length + notIn.length) + '명)<span class="en">All maids</span>', html);
+  } else if (key === 'in') {
+    openDetailModal('출근한 메이드 (' + checkedIn.length + '명)<span class="en">Checked in</span>', checkedInTableHtml(checkedIn));
+  } else if (key === 'y') {
+    const yes = checkedIn.filter(r => isLunchYes(r.lunch));
+    openDetailModal('점심 먹음 (' + yes.length + '명)<span class="en">Lunch: Yes</span>', checkedInTableHtml(yes));
+  } else if (key === 'n') {
+    const no = checkedIn.filter(r => isLunchNo(r.lunch));
+    openDetailModal('점심 안 먹음 (' + no.length + '명)<span class="en">Lunch: No</span>', checkedInTableHtml(no));
+  }
+}
+
+/* ---------------------------------------------------------
+ * 7-2. 관리자: 날짜별 조회 (기존 adminExportRange 재사용)
+ * --------------------------------------------------------- */
+function initCalDate() {
+  if (!$('#cal-date').value) {
+    const iso = new Date().toISOString().slice(0, 10);
+    $('#cal-date').value = iso;
+  }
+}
+
+async function searchCalDate() {
+  const date = $('#cal-date').value;
+  if (!date) {
+    toast('조회할 날짜를 선택해 주세요. / Please choose a date to look up.');
+    return;
+  }
+  const data = await adminApi({ action: 'adminExportRange', startDate: date, endDate: date }, { msg: '기록 조회 중... Looking up records...' });
+  if (!data) return;
+  if (apiFail(data)) return;
+  const rows = data.rows || [];
+  const box = $('#cal-result');
+  if (!rows.length) {
+    box.innerHTML = '<p class="notice" style="text-align:left">' + escapeHtml(date) + '에는 출근 기록이 없습니다.<span class="en">No check-in records on ' + escapeHtml(date) + '.</span></p>';
+    return;
+  }
+  const yesCount = rows.filter(r => isLunchYes(r.lunch)).length;
+  const noCount = rows.filter(r => isLunchNo(r.lunch)).length;
+  let html = '<p class="notice" style="text-align:left;margin-bottom:10px">출근 ' + rows.length + '명 · 점심 먹음 ' + yesCount + '명 · 안먹음 ' + noCount + '명'
+    + '<span class="en">Checked in: ' + rows.length + ' · Lunch yes: ' + yesCount + ' · no: ' + noCount + '</span></p>';
+  html += '<table class="list"><thead><tr><th>이름 <span class="slash-en">Name</span></th><th>출근 <span class="slash-en">In</span></th><th>점심 <span class="slash-en">Lunch</span></th><th>점심변경 <span class="slash-en">Updated</span></th></tr></thead><tbody>';
+  rows.forEach(r => {
+    html += '<tr><td>' + escapeHtml(r.maidName || '') + '</td><td>' + escapeHtml(r.checkInTime || '') + '</td><td>' + lunchPillHtml(r.lunch) + '</td><td>' + escapeHtml(r.lunchUpdatedAt || '') + '</td></tr>';
+  });
+  html += '</tbody></table>';
+  box.innerHTML = html;
+}
+
+/* ---------------------------------------------------------
+ * 8. 관리자: 메이드 관리
+ * --------------------------------------------------------- */
+async function loadMaids() {
+  const data = await adminApi({ action: 'adminGetMaidList' }, { msg: '메이드 명단 불러오는 중... Loading maids...' });
+  if (!data) return;
+  if (apiFail(data)) return;
+  const body = $('#tbl-maids tbody');
+  body.innerHTML = '';
+  (data.maids || []).forEach(m => {
+    const active = m.status === 'active';
+    const statusPill = active
+      ? '<span class="pill y">활동중/Active</span>' + (m.hasPin ? '' : ' <span class="pill gray">PIN 미등록/No PIN</span>')
+      : '<span class="pill gray">삭제됨/Removed</span>';
+    const actions = active
+      ? '<div class="row-actions">'
+      + '<button class="btn small" data-act="rename" data-id="' + m.maidId + '" data-name="' + escapeHtml(m.name) + '">이름변경<span class="en">Rename</span></button>'
+      + '<button class="btn small" data-act="pinreset" data-id="' + m.maidId + '" data-name="' + escapeHtml(m.name) + '">PIN초기화<span class="en">Reset PIN</span></button>'
+      + '<button class="btn small danger" data-act="del" data-id="' + m.maidId + '" data-name="' + escapeHtml(m.name) + '">삭제<span class="en">Remove</span></button>'
+      + '</div>'
+      : '';
+    const chk = active
+      ? '<input type="checkbox" class="maid-chk" data-id="' + m.maidId + '" data-name="' + escapeHtml(m.name) + '">'
+      : '';
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td>' + chk + '</td><td>' + escapeHtml(m.name) + '</td><td>' + statusPill + '</td><td>' + actions + '</td>';
+    body.appendChild(tr);
+  });
+  if (!(data.maids || []).length) {
+    body.innerHTML = '<tr><td colspan="4" class="notice">등록된 메이드가 없습니다. / No maids registered.</td></tr>';
+  }
+}
+
+/* ---------------------------------------------------------
+ * 8-1. 관리자: 메이드 일괄 추가 / 일괄 삭제
+ * --------------------------------------------------------- */
+async function bulkAddMaids() {
+  const raw = $('#bulk-maid-names').value;
+  const names = raw.split(/[\n,]/).map(s => s.trim()).filter(Boolean);
+  if (!names.length) {
+    toast('추가할 이름을 한 줄에 하나씩 입력해 주세요. / Enter one name per line to add.');
+    return;
+  }
+  // 현재 활동중인 메이드 명단을 먼저 조회해 중복 이름은 건너뜀 (방어적 처리)
+  const listData = await adminApi({ action: 'adminGetMaidList' }, { msg: '중복 확인 중... Checking duplicates...' });
+  if (!listData) return;
+  if (apiFail(listData)) return;
+  const existing = new Set((listData.maids || [])
+    .filter(m => m.status === 'active')
+    .map(m => m.name.trim().toLowerCase()));
+
+  // 이번 입력 내 중복도 제거
+  const seen = new Set();
+  const toAdd = [];
+  const skippedDup = [];
+  names.forEach(n => {
+    const key = n.toLowerCase();
+    if (existing.has(key) || seen.has(key)) { skippedDup.push(n); return; }
+    seen.add(key);
+    toAdd.push(n);
+  });
+
+  if (!toAdd.length) {
+    toast('입력한 이름이 모두 이미 등록되어 있습니다. / All entered names are already registered.');
+    return;
+  }
+
+  showOverlay('일괄 추가 중... (0/' + toAdd.length + ') Adding...');
+  let okCount = 0;
+  const failed = [];
+  for (let i = 0; i < toAdd.length; i++) {
+    $('.msg', $('#overlay')).textContent = '일괄 추가 중... (' + (i + 1) + '/' + toAdd.length + ') Adding...';
+    const data = await adminApi({ action: 'adminAddMaid', name: toAdd[i] }, { silent: true });
+    if (data && data.success) okCount++;
+    else failed.push(toAdd[i]);
+  }
+  hideOverlay();
+
+  $('#bulk-maid-names').value = '';
+  let msg = okCount + '명 추가 완료. / ' + okCount + ' added.';
+  if (skippedDup.length) msg += ' (중복 건너뜀 ' + skippedDup.length + '명 / ' + skippedDup.length + ' skipped as duplicates)';
+  if (failed.length) msg += ' (실패 ' + failed.length + '명: ' + failed.join(', ') + ')';
+  toast(msg);
+  loadMaids();
+}
+
+function getSelectedMaidChecks() {
+  return $all('.maid-chk').filter(c => c.checked);
+}
+
+async function bulkDeleteMaids() {
+  const checked = getSelectedMaidChecks();
+  if (!checked.length) {
+    toast('삭제할 메이드를 먼저 선택해 주세요. / Please select maids to delete first.');
+    return;
+  }
+  const names = checked.map(c => c.dataset.name);
+  const ok = confirm(
+    '다음 ' + checked.length + '명을 삭제할까요? 과거 출근기록은 이름 그대로 보존됩니다.\n' + names.join(', ')
+    + '\n\nRemove these ' + checked.length + ' maids? Past attendance records will be kept under their names.\n' + names.join(', ')
   );
-  return Utilities.base64Encode(digest);
+  if (!ok) return;
+
+  showOverlay('일괄 삭제 중... (0/' + checked.length + ') Removing...');
+  let okCount = 0;
+  const failed = [];
+  for (let i = 0; i < checked.length; i++) {
+    $('.msg', $('#overlay')).textContent = '일괄 삭제 중... (' + (i + 1) + '/' + checked.length + ') Removing...';
+    const data = await adminApi({ action: 'adminDeleteMaid', maidId: checked[i].dataset.id }, { silent: true });
+    if (data && data.success) okCount++;
+    else failed.push(checked[i].dataset.name);
+  }
+  hideOverlay();
+
+  let msg = okCount + '명 삭제 완료. / ' + okCount + ' removed.';
+  if (failed.length) msg += ' (실패: ' + failed.join(', ') + ')';
+  toast(msg);
+  loadMaids();
 }
 
-function sheetToObjects(sheet) {
-  var data = sheet.getDataRange().getValues();
-  if (data.length === 0) return [];
-  var headers = data[0];
-  var rows = [];
-  for (var i = 1; i < data.length; i++) {
-    var obj = {};
-    for (var j = 0; j < headers.length; j++) {
-      obj[headers[j]] = data[i][j];
+async function addMaid() {
+  const name = $('#new-maid-name').value.trim();
+  if (!name) { toast(errMsg('MISSING_NAME')); return; }
+  const data = await adminApi({ action: 'adminAddMaid', name }, { msg: '추가 중... Adding...' });
+  if (!data) return;
+  if (apiFail(data)) return;
+  $('#new-maid-name').value = '';
+  toast('메이드가 추가되었습니다. / Maid added.');
+  loadMaids();
+}
+
+async function maidRowAction(act, maidId, name) {
+  if (act === 'rename') {
+    const newName = prompt('새 이름을 입력해 주세요. / Enter the new name:', name);
+    if (newName == null) return;
+    const trimmed = newName.trim();
+    if (!trimmed) { toast(errMsg('MISSING_NAME')); return; }
+    const data = await adminApi({ action: 'adminEditMaid', maidId, newName: trimmed }, { msg: '이름 변경 중... Renaming...' });
+    if (!data) return;
+    if (apiFail(data)) return;
+    toast('이름이 변경되었습니다. / Name updated.');
+    loadMaids();
+  } else if (act === 'pinreset') {
+    if (!confirm('[' + name + '] PIN을 초기화할까요? 본인이 다시 등록해야 합니다.\nReset the PIN for [' + name + ']? They will need to register a new PIN.')) return;
+    const data = await adminApi({ action: 'adminResetMaidPin', maidId }, { msg: 'PIN 초기화 중... Resetting PIN...' });
+    if (!data) return;
+    if (apiFail(data)) return;
+    toast('PIN이 초기화되었습니다. / PIN has been reset.');
+    loadMaids();
+  } else if (act === 'del') {
+    if (!confirm('[' + name + '] 메이드를 삭제할까요? 과거 출근기록은 이름 그대로 보존됩니다.\nRemove maid [' + name + ']? Past attendance records will be kept under this name.')) return;
+    const data = await adminApi({ action: 'adminDeleteMaid', maidId }, { msg: '삭제 중... Removing...' });
+    if (!data) return;
+    if (apiFail(data)) return;
+    toast('삭제되었습니다. / Removed.');
+    loadMaids();
+  }
+}
+
+/* ---------------------------------------------------------
+ * 9. 관리자: 관리자 계정 관리 / 비밀번호 변경
+ * --------------------------------------------------------- */
+async function loadAdmins() {
+  const data = await adminApi({ action: 'adminGetAdminList' }, { msg: '관리자 목록 불러오는 중... Loading admins...' });
+  if (!data) return;
+  if (apiFail(data)) return;
+  const body = $('#tbl-admins tbody');
+  body.innerHTML = '';
+  const iAmMaster = admRole() === 'master';
+  const me = admUser();
+  (data.admins || []).forEach(a => {
+    const rolePill = a.role === 'master'
+      ? '<span class="pill y">마스터/Master</span>'
+      : '<span class="pill gray">일반/Staff</span>';
+    let actions = '<div class="row-actions">';
+    if (iAmMaster && a.role !== 'master') {
+      actions += '<button class="btn small" data-act="transfer" data-id="' + a.adminId + '" data-name="' + escapeHtml(a.username) + '">마스터위임<span class="en">Make master</span></button>';
+      actions += '<button class="btn small danger" data-act="deladm" data-id="' + a.adminId + '" data-name="' + escapeHtml(a.username) + '">삭제<span class="en">Delete</span></button>';
+    } else if (a.role !== 'master' && a.username !== me) {
+      actions += '<button class="btn small danger" data-act="deladm" data-id="' + a.adminId + '" data-name="' + escapeHtml(a.username) + '">삭제<span class="en">Delete</span></button>';
     }
-    obj.__row = i + 1; // 실제 시트 행 번호 (1-indexed, 헤더 포함)
-    rows.push(obj);
-  }
-  return rows;
-}
-
-function findRowIndexById(sheet, idColName, idValue) {
-  var data = sheet.getDataRange().getValues();
-  var headers = data[0];
-  var idCol = headers.indexOf(idColName);
-  for (var i = 1; i < data.length; i++) {
-    if (data[i][idCol] === idValue) return i + 1; // 1-indexed
-  }
-  return -1;
-}
-
-function colIndex(sheet, colName) {
-  var headers = sheet.getDataRange().getValues()[0];
-  return headers.indexOf(colName) + 1; // getRange는 1-indexed
-}
-
-// ===================== 점심 13:00 마감 판정 유틸 =====================
-
-// 지금 이 순간이 13:00을 지났는지 (Asia/Seoul 기준)
-function isPastLunchDeadlineNow() {
-  var hour = Number(Utilities.formatDate(new Date(), TIMEZONE, 'H'));
-  return hour >= LUNCH_DEADLINE_HOUR;
-}
-
-// 특정 날짜(yyyy-MM-dd)의 점심 마감이 이미 지났는지
-// - 오늘보다 이전 날짜: 무조건 마감 지남
-// - 오늘 날짜: 현재 시각이 13:00을 지났는지로 판정
-// - 오늘보다 이후 날짜: 있을 수 없는 값이지만 방어적으로 false 처리
-function isLunchDeadlinePassedForDate(dateStr) {
-  var today = todayKey();
-  if (dateStr < today) return true;
-  if (dateStr > today) return false;
-  return isPastLunchDeadlineNow();
-}
-
-// attendance 시트 전체를 훑어 마감이 지났는데도 점심이 미선택(빈값)인 행을
-// 전부 '안먹음(N)'으로 자동 확정한다. 요청마다 매번 전체 스캔하면 비용이 크므로
-// CacheService로 5분에 1회만 실행되도록 가드한다.
-function autoLockPastDueLunches() {
-  try {
-    var cache = CacheService.getScriptCache();
-    if (cache.get('lunch_autolock_guard')) return;
-    cache.put('lunch_autolock_guard', '1', LUNCH_AUTOLOCK_CACHE_TTL_SEC);
-
-    var today = todayKey();
-    var sheet = getSheet(SHEET_ATTENDANCE);
-    var data = sheet.getDataRange().getValues();
-    if (data.length <= 1) return;
-
-    var headers = data[0];
-    var dateCol = headers.indexOf('date');
-    var lunchCol = headers.indexOf('lunch');
-    var lunchUpdatedCol = headers.indexOf('lunchUpdatedAt');
-    var pastDeadlineToday = isPastLunchDeadlineNow();
-
-    var rowsToFix = [];
-    for (var i = 1; i < data.length; i++) {
-      var rowDate = data[i][dateCol];
-      var rowLunch = data[i][lunchCol];
-      if (rowLunch === 'Y' || rowLunch === 'N') continue; // 이미 선택됨
-      var deadlinePassed = (rowDate < today) || (rowDate === today && pastDeadlineToday);
-      if (deadlinePassed) rowsToFix.push(i + 1); // 1-indexed 시트 행 번호
-    }
-    if (rowsToFix.length === 0) return;
-
-    var lock = LockService.getScriptLock();
-    lock.waitLock(10000);
-    try {
-      var nowFull = nowIso();
-      for (var k = 0; k < rowsToFix.length; k++) {
-        sheet.getRange(rowsToFix[k], lunchCol + 1).setValue('N');
-        sheet.getRange(rowsToFix[k], lunchUpdatedCol + 1).setValue(nowFull);
-      }
-    } finally {
-      lock.releaseLock();
-    }
-  } catch (err) {
-    // 자동 처리 실패는 치명적이지 않음 - 다음 요청(또는 다음 5분 주기)에서 재시도
-  }
-}
-
-// ===================== 관리자 인증 미들웨어 =====================
-
-function withAdminAuth(body, fn) {
-  var token = body.token;
-  if (!token) return { success: false, error: 'NO_TOKEN' };
-
-  var cache = CacheService.getScriptCache();
-  var raw = cache.get('session_' + token);
-  if (!raw) return { success: false, error: 'SESSION_EXPIRED' };
-
-  var admin = JSON.parse(raw);
-  return fn(admin);
-}
-
-// ===================== 메이드: 명단 조회 =====================
-
-function handleGetMaidList() {
-  var sheet = getSheet(SHEET_MAIDS);
-  var rows = sheetToObjects(sheet);
-  var list = [];
-  for (var i = 0; i < rows.length; i++) {
-    var r = rows[i];
-    if (r.status !== 'active') continue;
-    list.push({
-      maidId: r.maidId,
-      name: r.name,
-      hasPin: !!r.pinHash
-    });
-  }
-  return { success: true, maids: list };
-}
-
-// ===================== 메이드: PIN 최초 등록 =====================
-
-function handleRegisterMaid(body) {
-  var maidId = body.maidId;
-  var pin = body.pin;
-  var deviceToken = body.deviceToken;
-
-  if (!maidId || !pin || !deviceToken) {
-    return { success: false, error: 'MISSING_FIELDS' };
-  }
-  if (!/^\d{4}$/.test(pin)) {
-    return { success: false, error: 'INVALID_PIN_FORMAT' };
-  }
-
-  var lock = LockService.getScriptLock();
-  lock.waitLock(10000);
-  try {
-    var sheet = getSheet(SHEET_MAIDS);
-    var rowIdx = findRowIndexById(sheet, 'maidId', maidId);
-    if (rowIdx === -1) return { success: false, error: 'MAID_NOT_FOUND' };
-
-    var row = sheet.getRange(rowIdx, 1, 1, sheet.getLastColumn()).getValues()[0];
-    var headers = sheet.getDataRange().getValues()[0];
-    var statusVal = row[headers.indexOf('status')];
-    var existingPinHash = row[headers.indexOf('pinHash')];
-
-    if (statusVal !== 'active') return { success: false, error: 'MAID_NOT_ACTIVE' };
-    if (existingPinHash) return { success: false, error: 'ALREADY_REGISTERED' };
-
-    var pinSalt = Utilities.getUuid();
-    var pinHash = hashValue(pin, pinSalt);
-    var deviceTokenHash = hashValue(deviceToken, maidId);
-
-    sheet.getRange(rowIdx, colIndex(sheet, 'pinHash')).setValue(pinHash);
-    sheet.getRange(rowIdx, colIndex(sheet, 'pinSalt')).setValue(pinSalt);
-    sheet.getRange(rowIdx, colIndex(sheet, 'deviceTokenHash')).setValue(deviceTokenHash);
-    sheet.getRange(rowIdx, colIndex(sheet, 'registeredAt')).setValue(nowIso());
-
-    return { success: true };
-  } finally {
-    lock.releaseLock();
-  }
-}
-
-// ===================== 메이드: 로그인 =====================
-
-function handleLoginMaid(body) {
-  var maidId = body.maidId;
-  var pin = body.pin;
-  if (!maidId || !pin) return { success: false, error: 'MISSING_FIELDS' };
-
-  var sheet = getSheet(SHEET_MAIDS);
-  var rows = sheetToObjects(sheet);
-  var maid = null;
-  for (var i = 0; i < rows.length; i++) {
-    if (rows[i].maidId === maidId) { maid = rows[i]; break; }
-  }
-  if (!maid) return { success: false, error: 'MAID_NOT_FOUND' };
-  if (maid.status !== 'active') return { success: false, error: 'MAID_NOT_ACTIVE' };
-  if (!maid.pinHash) return { success: false, error: 'NOT_REGISTERED' };
-
-  var hash = hashValue(pin, maid.pinSalt);
-  if (hash !== maid.pinHash) return { success: false, error: 'WRONG_PIN' };
-
-  return { success: true, maidId: maid.maidId, name: maid.name };
-}
-
-// ===================== 메이드: PIN 재설정 (기기 바인딩) =====================
-
-function handleResetPin(body) {
-  var maidId = body.maidId;
-  var deviceToken = body.deviceToken;
-  var newPin = body.newPin;
-
-  if (!maidId || !deviceToken || !newPin) return { success: false, error: 'MISSING_FIELDS' };
-  if (!/^\d{4}$/.test(newPin)) return { success: false, error: 'INVALID_PIN_FORMAT' };
-
-  var lock = LockService.getScriptLock();
-  lock.waitLock(10000);
-  try {
-    var sheet = getSheet(SHEET_MAIDS);
-    var rowIdx = findRowIndexById(sheet, 'maidId', maidId);
-    if (rowIdx === -1) return { success: false, error: 'MAID_NOT_FOUND' };
-
-    var headers = sheet.getDataRange().getValues()[0];
-    var row = sheet.getRange(rowIdx, 1, 1, sheet.getLastColumn()).getValues()[0];
-    var storedDeviceTokenHash = row[headers.indexOf('deviceTokenHash')];
-
-    if (!storedDeviceTokenHash) return { success: false, error: 'NOT_REGISTERED' };
-
-    var incomingHash = hashValue(deviceToken, maidId);
-    if (incomingHash !== storedDeviceTokenHash) {
-      return { success: false, error: 'DEVICE_MISMATCH' };
-    }
-
-    var newSalt = Utilities.getUuid();
-    var newHash = hashValue(newPin, newSalt);
-    sheet.getRange(rowIdx, colIndex(sheet, 'pinHash')).setValue(newHash);
-    sheet.getRange(rowIdx, colIndex(sheet, 'pinSalt')).setValue(newSalt);
-
-    return { success: true };
-  } finally {
-    lock.releaseLock();
-  }
-}
-
-// ===================== 메이드: 당일 상태 조회 =====================
-
-function handleCheckStatusToday(body) {
-  var maidId = body.maidId;
-  if (!maidId) return { success: false, error: 'MISSING_FIELDS' };
-
-  var today = todayKey();
-  var sheet = getSheet(SHEET_ATTENDANCE);
-  var rows = sheetToObjects(sheet);
-
-  for (var i = 0; i < rows.length; i++) {
-    var r = rows[i];
-    if (r.maidId === maidId && r.date === today) {
-      return {
-        success: true,
-        checkedIn: true,
-        checkInTime: r.checkInTime,
-        lunch: r.lunch,
-        lunchUpdatedAt: r.lunchUpdatedAt,
-        lunchLocked: isPastLunchDeadlineNow()
-      };
-    }
-  }
-  return { success: true, checkedIn: false, lunchLocked: isPastLunchDeadlineNow() };
-}
-
-// ===================== 메이드: 출근 체크 (+ 점심 선택, 선택 사항) =====================
-
-function handleCheckIn(body) {
-  var maidId = body.maidId;
-  // 정책 변경: 점심 선택은 더 이상 출근의 필수 조건이 아니다.
-  // 유효하지 않은 값(빈 문자열 포함)은 '미선택'으로 간주한다.
-  var lunch = (body.lunch === 'Y' || body.lunch === 'N') ? body.lunch : '';
-
-  if (!maidId) {
-    return { success: false, error: 'MISSING_FIELDS' };
-  }
-
-  var lock = LockService.getScriptLock();
-  lock.waitLock(10000);
-  try {
-    var today = todayKey();
-    var attSheet = getSheet(SHEET_ATTENDANCE);
-    var rows = sheetToObjects(attSheet);
-
-    for (var i = 0; i < rows.length; i++) {
-      if (rows[i].maidId === maidId && rows[i].date === today) {
-        return { success: false, error: 'ALREADY_CHECKED_IN' };
-      }
-    }
-
-    var maidSheet = getSheet(SHEET_MAIDS);
-    var maidRows = sheetToObjects(maidSheet);
-    var maid = null;
-    for (var j = 0; j < maidRows.length; j++) {
-      if (maidRows[j].maidId === maidId) { maid = maidRows[j]; break; }
-    }
-    if (!maid || maid.status !== 'active') return { success: false, error: 'MAID_NOT_ACTIVE' };
-
-    var checkInTime = nowTimeOnly();
-    var nowFull = nowIso();
-
-    // 이미 13:00이 지난 시각에 출근하면서 점심을 선택하지 않았다면
-    // 대기할 필요 없이 즉시 '안먹음'으로 확정한다.
-    var finalLunch = lunch;
-    var lunchUpdatedAt = lunch ? nowFull : '';
-    if (!finalLunch && isPastLunchDeadlineNow()) {
-      finalLunch = 'N';
-      lunchUpdatedAt = nowFull;
-    }
-
-    attSheet.appendRow([
-      Utilities.getUuid(), today, maidId, maid.name,
-      checkInTime, finalLunch, lunchUpdatedAt, nowFull
-    ]);
-
-    return {
-      success: true,
-      checkInTime: checkInTime,
-      lunch: finalLunch,
-      lunchLocked: isPastLunchDeadlineNow()
-    };
-  } finally {
-    lock.releaseLock();
-  }
-}
-
-// ===================== 메이드: 점심 선택 변경 (13:00까지만) =====================
-
-function handleUpdateLunch(body) {
-  var maidId = body.maidId;
-  var lunch = body.lunch;
-
-  if (!maidId || (lunch !== 'Y' && lunch !== 'N')) {
-    return { success: false, error: 'MISSING_FIELDS' };
-  }
-
-  // 13:00 마감 이후에는 메이드 본인이 직접 변경 불가 - 관리자에게 문의해야 함
-  if (isPastLunchDeadlineNow()) {
-    return { success: false, error: 'LUNCH_LOCKED' };
-  }
-
-  var lock = LockService.getScriptLock();
-  lock.waitLock(10000);
-  try {
-    var today = todayKey();
-    var sheet = getSheet(SHEET_ATTENDANCE);
-    var data = sheet.getDataRange().getValues();
-    var headers = data[0];
-    var dateCol = headers.indexOf('date');
-    var maidCol = headers.indexOf('maidId');
-    var lunchCol = headers.indexOf('lunch');
-    var lunchUpdatedCol = headers.indexOf('lunchUpdatedAt');
-
-    for (var i = 1; i < data.length; i++) {
-      if (data[i][maidCol] === maidId && data[i][dateCol] === today) {
-        var rowIdx = i + 1;
-        var nowFull = nowIso();
-        sheet.getRange(rowIdx, lunchCol + 1).setValue(lunch);
-        sheet.getRange(rowIdx, lunchUpdatedCol + 1).setValue(nowFull);
-        return { success: true, lunch: lunch, lunchUpdatedAt: nowFull };
-      }
-    }
-    return { success: false, error: 'NOT_CHECKED_IN_TODAY' };
-  } finally {
-    lock.releaseLock();
-  }
-}
-
-// ===================== 관리자: 로그인 =====================
-
-function handleAdminLogin(body) {
-  var username = body.username;
-  var password = body.password;
-  if (!username || !password) return { success: false, error: 'MISSING_FIELDS' };
-
-  var sheet = getSheet(SHEET_ADMINS);
-  var rows = sheetToObjects(sheet);
-  var admin = null;
-  for (var i = 0; i < rows.length; i++) {
-    if (rows[i].username === username) { admin = rows[i]; break; }
-  }
-  if (!admin) return { success: false, error: 'ADMIN_NOT_FOUND' };
-
-  var hash = hashValue(password, admin.passwordSalt);
-  if (hash !== admin.passwordHash) return { success: false, error: 'WRONG_PASSWORD' };
-
-  var token = Utilities.getUuid();
-  var cache = CacheService.getScriptCache();
-  cache.put('session_' + token, JSON.stringify({
-    adminId: admin.adminId, username: admin.username, role: admin.role
-  }), SESSION_TTL_SEC);
-
-  return { success: true, token: token, role: admin.role, username: admin.username };
-}
-
-function handleAdminChangeOwnPassword(admin, body) {
-  var oldPassword = body.oldPassword;
-  var newPassword = body.newPassword;
-  if (!oldPassword || !newPassword) return { success: false, error: 'MISSING_FIELDS' };
-
-  var sheet = getSheet(SHEET_ADMINS);
-  var rowIdx = findRowIndexById(sheet, 'adminId', admin.adminId);
-  if (rowIdx === -1) return { success: false, error: 'ADMIN_NOT_FOUND' };
-
-  var headers = sheet.getDataRange().getValues()[0];
-  var row = sheet.getRange(rowIdx, 1, 1, sheet.getLastColumn()).getValues()[0];
-  var currentHash = row[headers.indexOf('passwordHash')];
-  var currentSalt = row[headers.indexOf('passwordSalt')];
-
-  if (hashValue(oldPassword, currentSalt) !== currentHash) {
-    return { success: false, error: 'WRONG_PASSWORD' };
-  }
-
-  var newSalt = Utilities.getUuid();
-  var newHash = hashValue(newPassword, newSalt);
-  sheet.getRange(rowIdx, colIndex(sheet, 'passwordHash')).setValue(newHash);
-  sheet.getRange(rowIdx, colIndex(sheet, 'passwordSalt')).setValue(newSalt);
-
-  return { success: true };
-}
-
-// ===================== 관리자: 대시보드 =====================
-
-function handleAdminGetDashboard() {
-  var today = todayKey();
-  var maidRows = sheetToObjects(getSheet(SHEET_MAIDS)).filter(function (r) { return r.status === 'active'; });
-  var attRows = sheetToObjects(getSheet(SHEET_ATTENDANCE)).filter(function (r) { return r.date === today; });
-
-  var checkedInIds = {};
-  var lunchYes = 0, lunchNo = 0, lastLunchUpdate = null;
-  var checkedInList = [];
-
-  attRows.forEach(function (r) {
-    checkedInIds[r.maidId] = true;
-    checkedInList.push({ maidId: r.maidId, name: r.maidName, checkInTime: r.checkInTime, lunch: r.lunch, lunchUpdatedAt: r.lunchUpdatedAt });
-    if (r.lunch === 'Y') lunchYes++;
-    if (r.lunch === 'N') lunchNo++;
-    if (r.lunchUpdatedAt && (!lastLunchUpdate || r.lunchUpdatedAt > lastLunchUpdate)) {
-      lastLunchUpdate = r.lunchUpdatedAt;
-    }
+    actions += '</div>';
+    const tr = document.createElement('tr');
+    tr.innerHTML = '<td>' + escapeHtml(a.username) + '</td><td>' + rolePill + '</td><td>' + actions + '</td>';
+    body.appendChild(tr);
   });
-
-  var notCheckedIn = maidRows
-    .filter(function (m) { return !checkedInIds[m.maidId]; })
-    .map(function (m) { return { maidId: m.maidId, name: m.name }; });
-
-  return {
-    success: true,
-    date: today,
-    totalMaids: maidRows.length,
-    checkedInCount: attRows.length,
-    notCheckedInCount: notCheckedIn.length,
-    lunchYes: lunchYes,
-    lunchNo: lunchNo,
-    lastLunchUpdate: lastLunchUpdate,
-    checkedInList: checkedInList,
-    notCheckedInList: notCheckedIn,
-    lunchLocked: isPastLunchDeadlineNow()
-  };
 }
 
-// ===================== 관리자: 점심 수정 (13:00 마감 이후에도 항상 허용) =====================
-
-function handleAdminUpdateLunch(body) {
-  var maidId = body.maidId;
-  var lunch = body.lunch;
-  var dateStr = body.date || todayKey(); // 미지정 시 오늘 기록 대상
-
-  if (!maidId || (lunch !== 'Y' && lunch !== 'N')) {
-    return { success: false, error: 'MISSING_FIELDS' };
+async function addAdmin() {
+  const username = $('#new-adm-id').value.trim();
+  const password = $('#new-adm-pw').value;
+  if (!username || !password) {
+    toast('아이디와 비밀번호를 입력해 주세요. / Please enter a username and password.');
+    return;
   }
+  const data = await adminApi({ action: 'adminAddAdmin', username, password }, { msg: '추가 중... Adding...' });
+  if (!data) return;
+  if (apiFail(data)) return;
+  $('#new-adm-id').value = '';
+  $('#new-adm-pw').value = '';
+  toast('관리자가 추가되었습니다. / Admin added.');
+  loadAdmins();
+}
 
-  var lock = LockService.getScriptLock();
-  lock.waitLock(10000);
-  try {
-    var sheet = getSheet(SHEET_ATTENDANCE);
-    var data = sheet.getDataRange().getValues();
-    var headers = data[0];
-    var maidCol = headers.indexOf('maidId');
-    var dateCol = headers.indexOf('date');
-    var lunchCol = headers.indexOf('lunch');
-    var lunchUpdatedCol = headers.indexOf('lunchUpdatedAt');
-
-    for (var i = 1; i < data.length; i++) {
-      if (data[i][maidCol] === maidId && data[i][dateCol] === dateStr) {
-        var rowIdx = i + 1;
-        var nowFull = nowIso();
-        sheet.getRange(rowIdx, lunchCol + 1).setValue(lunch);
-        sheet.getRange(rowIdx, lunchUpdatedCol + 1).setValue(nowFull);
-        return { success: true, lunch: lunch, lunchUpdatedAt: nowFull, maidId: maidId, date: dateStr };
-      }
-    }
-    return { success: false, error: 'NOT_CHECKED_IN_TODAY' };
-  } finally {
-    lock.releaseLock();
+async function adminRowAction(act, targetAdminId, name) {
+  if (act === 'deladm') {
+    if (!confirm('[' + name + '] 관리자를 삭제할까요?\nDelete admin [' + name + ']?')) return;
+    const data = await adminApi({ action: 'adminDeleteAdmin', targetAdminId }, { msg: '삭제 중... Deleting...' });
+    if (!data) return;
+    if (apiFail(data)) return;
+    toast('삭제되었습니다. / Deleted.');
+    loadAdmins();
+  } else if (act === 'transfer') {
+    if (!confirm('[' + name + '] 계정에 마스터 권한을 위임할까요? 내 권한은 일반 관리자로 바뀝니다.\nTransfer master role to [' + name + ']? Your role will become a regular admin.')) return;
+    const data = await adminApi({ action: 'adminTransferMaster', targetAdminId }, { msg: '위임 중... Transferring...' });
+    if (!data) return;
+    if (apiFail(data)) return;
+    sessionStorage.setItem(CONFIG.ADMIN_ROLE_KEY, 'admin');
+    $('#whoami').textContent = admUser();
+    toast('마스터 권한이 위임되었습니다. / Master role transferred.');
+    loadAdmins();
   }
 }
 
-// ===================== 관리자: 메이드 관리 =====================
+async function changeOwnPassword() {
+  const oldPassword = $('#pw-old').value;
+  const newPassword = $('#pw-new').value;
+  if (!oldPassword || !newPassword) {
+    toast('현재/새 비밀번호를 모두 입력해 주세요. / Please enter both current and new passwords.');
+    return;
+  }
+  const data = await adminApi({ action: 'adminChangeOwnPassword', oldPassword, newPassword }, { msg: '비밀번호 변경 중... Changing password...' });
+  if (!data) return;
+  if (apiFail(data)) return;
+  $('#pw-old').value = '';
+  $('#pw-new').value = '';
+  toast('비밀번호가 변경되었습니다. / Password changed.');
+}
 
-function handleAdminGetMaidList() {
-  var rows = sheetToObjects(getSheet(SHEET_MAIDS));
-  var list = rows.map(function (r) {
-    return {
-      maidId: r.maidId,
-      name: r.name,
-      status: r.status,
-      hasPin: !!r.pinHash,
-      registeredAt: r.registeredAt,
-      createdAt: r.createdAt,
-      deletedAt: r.deletedAt
-    };
+/* ---------------------------------------------------------
+ * 10. 관리자: 정산 엑셀 다운로드 (SheetJS)
+ * --------------------------------------------------------- */
+function initExportDates() {
+  const today = new Date();
+  const iso = d => d.toISOString().slice(0, 10);
+  const first = new Date(today.getFullYear(), today.getMonth(), 1);
+  if (!$('#exp-start').value) $('#exp-start').value = iso(first);
+  if (!$('#exp-end').value) $('#exp-end').value = iso(today);
+}
+
+async function exportRange() {
+  const startDate = $('#exp-start').value;
+  const endDate = $('#exp-end').value;
+  if (!startDate || !endDate) {
+    toast('시작일과 종료일을 선택해 주세요. / Please choose both start and end dates.');
+    return;
+  }
+  if (startDate > endDate) {
+    toast('시작일이 종료일보다 늦을 수 없습니다. / The start date cannot be after the end date.');
+    return;
+  }
+  const data = await adminApi({ action: 'adminExportRange', startDate, endDate }, { msg: '정산 데이터 불러오는 중... Loading export data...' });
+  if (!data) return;
+  if (apiFail(data)) return;
+  const rows = data.rows || [];
+  if (!rows.length) {
+    toast('해당 기간에 기록이 없습니다. / No records in this period.');
+    return;
+  }
+  if (typeof XLSX === 'undefined') {
+    toast('엑셀 모듈을 불러오지 못했습니다. 새로고침 후 다시 시도해 주세요. / Excel module failed to load. Please refresh and try again.');
+    return;
+  }
+  const aoa = [['날짜 Date', '이름 Name', '출근시각 Check-in', '점심 Lunch', '점심 변경시각 Lunch updated']];
+  rows.forEach(r => {
+    aoa.push([r.date || '', r.maidName || '', r.checkInTime || '', lunchLabel(r.lunch), r.lunchUpdatedAt || '']);
   });
-  return { success: true, maids: list };
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!cols'] = [{ wch: 12 }, { wch: 14 }, { wch: 12 }, { wch: 12 }, { wch: 20 }];
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'attendance');
+  XLSX.writeFile(wb, '출근기록_attendance_' + startDate + '_' + endDate + '.xlsx');
+  toast('엑셀 파일이 다운로드되었습니다. / Excel file downloaded.');
 }
 
-function handleAdminAddMaid(body) {
-  var name = body.name;
-  if (!name || !String(name).trim()) return { success: false, error: 'MISSING_NAME' };
+/* ---------------------------------------------------------
+ * 11. 이벤트 바인딩
+ * --------------------------------------------------------- */
+setupPinBoxes();
 
-  var sheet = getSheet(SHEET_MAIDS);
-  var maidId = Utilities.getUuid();
-  sheet.appendRow([
-    maidId, String(name).trim(), 'active', '', '', '', '', nowIso(), ''
-  ]);
-  return { success: true, maidId: maidId };
-}
+$('#pin-submit').addEventListener('click', submitPin);
+$('#pin-reset-link').addEventListener('click', () => {
+  pinMode = 'reset';
+  renderPinScreen();
+  focusFirstPin();
+});
+$('#pin-back').addEventListener('click', () => { currentMaid = null; loadNameGrid(); });
 
-function handleAdminEditMaid(body) {
-  var maidId = body.maidId;
-  var newName = body.newName;
-  if (!maidId || !newName || !String(newName).trim()) return { success: false, error: 'MISSING_FIELDS' };
-
-  var sheet = getSheet(SHEET_MAIDS);
-  var rowIdx = findRowIndexById(sheet, 'maidId', maidId);
-  if (rowIdx === -1) return { success: false, error: 'MAID_NOT_FOUND' };
-
-  sheet.getRange(rowIdx, colIndex(sheet, 'name')).setValue(String(newName).trim());
-  return { success: true };
-}
-
-function handleAdminDeleteMaid(body) {
-  var maidId = body.maidId;
-  if (!maidId) return { success: false, error: 'MISSING_FIELDS' };
-
-  var sheet = getSheet(SHEET_MAIDS);
-  var rowIdx = findRowIndexById(sheet, 'maidId', maidId);
-  if (rowIdx === -1) return { success: false, error: 'MAID_NOT_FOUND' };
-
-  sheet.getRange(rowIdx, colIndex(sheet, 'status')).setValue('deleted');
-  sheet.getRange(rowIdx, colIndex(sheet, 'deletedAt')).setValue(nowIso());
-  // 과거 attendance 기록은 maidName 스냅샷으로 보존되어 있으므로 별도 처리 불필요
-  return { success: true };
-}
-
-function handleAdminResetMaidPin(body) {
-  var maidId = body.maidId;
-  if (!maidId) return { success: false, error: 'MISSING_FIELDS' };
-
-  var sheet = getSheet(SHEET_MAIDS);
-  var rowIdx = findRowIndexById(sheet, 'maidId', maidId);
-  if (rowIdx === -1) return { success: false, error: 'MAID_NOT_FOUND' };
-
-  sheet.getRange(rowIdx, colIndex(sheet, 'pinHash')).setValue('');
-  sheet.getRange(rowIdx, colIndex(sheet, 'pinSalt')).setValue('');
-  sheet.getRange(rowIdx, colIndex(sheet, 'deviceTokenHash')).setValue('');
-  sheet.getRange(rowIdx, colIndex(sheet, 'registeredAt')).setValue('');
-
-  return { success: true };
-}
-
-// ===================== 관리자: 관리자 계정 관리 (마스터 전용) =====================
-
-function handleAdminGetAdminList() {
-  var rows = sheetToObjects(getSheet(SHEET_ADMINS));
-  var list = rows.map(function (r) {
-    return { adminId: r.adminId, username: r.username, role: r.role, createdAt: r.createdAt };
+$all('#lunch-pre button').forEach(b => {
+  b.addEventListener('click', () => {
+    preLunch = b.dataset.v;
+    paintLunchToggle('#lunch-pre', preLunch);
   });
-  return { success: true, admins: list };
-}
-
-function handleAdminAddAdmin(admin, body) {
-  if (admin.role !== 'master') return { success: false, error: 'MASTER_ONLY' };
-
-  var username = body.username;
-  var password = body.password;
-  if (!username || !password) return { success: false, error: 'MISSING_FIELDS' };
-
-  var sheet = getSheet(SHEET_ADMINS);
-  var rows = sheetToObjects(sheet);
-  for (var i = 0; i < rows.length; i++) {
-    if (rows[i].username === username) return { success: false, error: 'USERNAME_TAKEN' };
-  }
-
-  var salt = Utilities.getUuid();
-  var hash = hashValue(password, salt);
-  sheet.appendRow([Utilities.getUuid(), username, hash, salt, 'admin', nowIso()]);
-
-  return { success: true };
-}
-
-function handleAdminDeleteAdmin(admin, body) {
-  if (admin.role !== 'master') return { success: false, error: 'MASTER_ONLY' };
-
-  var targetAdminId = body.targetAdminId;
-  if (!targetAdminId) return { success: false, error: 'MISSING_FIELDS' };
-  if (targetAdminId === admin.adminId) return { success: false, error: 'CANNOT_DELETE_SELF' };
-
-  var sheet = getSheet(SHEET_ADMINS);
-  var rowIdx = findRowIndexById(sheet, 'adminId', targetAdminId);
-  if (rowIdx === -1) return { success: false, error: 'ADMIN_NOT_FOUND' };
-
-  var headers = sheet.getDataRange().getValues()[0];
-  var row = sheet.getRange(rowIdx, 1, 1, sheet.getLastColumn()).getValues()[0];
-  if (row[headers.indexOf('role')] === 'master') {
-    return { success: false, error: 'CANNOT_DELETE_MASTER' };
-  }
-
-  sheet.deleteRow(rowIdx);
-  return { success: true };
-}
-
-function handleAdminTransferMaster(admin, body) {
-  if (admin.role !== 'master') return { success: false, error: 'MASTER_ONLY' };
-
-  var targetAdminId = body.targetAdminId;
-  if (!targetAdminId) return { success: false, error: 'MISSING_FIELDS' };
-  if (targetAdminId === admin.adminId) return { success: false, error: 'ALREADY_MASTER' };
-
-  var sheet = getSheet(SHEET_ADMINS);
-  var targetRowIdx = findRowIndexById(sheet, 'adminId', targetAdminId);
-  if (targetRowIdx === -1) return { success: false, error: 'TARGET_NOT_FOUND' };
-
-  var selfRowIdx = findRowIndexById(sheet, 'adminId', admin.adminId);
-  if (selfRowIdx === -1) return { success: false, error: 'SELF_NOT_FOUND' };
-
-  var lock = LockService.getScriptLock();
-  lock.waitLock(10000);
-  try {
-    sheet.getRange(targetRowIdx, colIndex(sheet, 'role')).setValue('master');
-    sheet.getRange(selfRowIdx, colIndex(sheet, 'role')).setValue('admin');
-    return { success: true };
-  } finally {
-    lock.releaseLock();
-  }
-}
-
-// ===================== 관리자: 정산용 데이터 내보내기 =====================
-
-function handleAdminExportRange(body) {
-  var startDate = body.startDate; // 'yyyy-MM-dd'
-  var endDate = body.endDate;     // 'yyyy-MM-dd'
-  if (!startDate || !endDate) return { success: false, error: 'MISSING_FIELDS' };
-
-  var rows = sheetToObjects(getSheet(SHEET_ATTENDANCE));
-  var filtered = rows.filter(function (r) {
-    return r.date >= startDate && r.date <= endDate;
-  }).map(function (r) {
-    return {
-      date: r.date,
-      maidName: r.maidName,
-      checkInTime: r.checkInTime,
-      lunch: r.lunch === 'Y' ? '먹음' : '안먹음',
-      lunchUpdatedAt: r.lunchUpdatedAt
-    };
+});
+$('#btn-checkin').addEventListener('click', doCheckIn);
+$all('#lunch-post button').forEach(b => {
+  b.addEventListener('click', () => {
+    if (b.disabled) return;
+    changeLunch(b.dataset.v);
   });
+});
+$('#main-logout').addEventListener('click', () => { currentMaid = null; loadNameGrid(); });
 
-  filtered.sort(function (a, b) {
-    if (a.date !== b.date) return a.date < b.date ? -1 : 1;
-    return a.maidName < b.maidName ? -1 : 1;
-  });
-
-  return { success: true, rows: filtered };
-}
-
-// ==================== 데이터 무결성: 텍스트 형식 강제 ====================
-// Google Sheets가 yyyy-MM-dd 등의 문자열을 Date로 자동 변환하면 getValues()
-// 문자열 비교가 실패하므로, 세 시트 전체를 일반 텍스트(@) 형식으로 고정한다.
-// CacheService 가드로 6시간에 1회만 실제 실행된다.
-function enforcePlainTextFormats() {
-  try {
-    var cache = CacheService.getScriptCache();
-    if (cache.get('fmt_enforced')) return;
-    var ss = SpreadsheetApp.getActiveSpreadsheet();
-    [SHEET_MAIDS, SHEET_ATTENDANCE, SHEET_ADMINS].forEach(function (name) {
-      var sh = ss.getSheetByName(name);
-      if (sh) sh.getRange(1, 1, sh.getMaxRows(), sh.getMaxColumns()).setNumberFormat('@');
-    });
-    cache.put('fmt_enforced', '1', 21600);
-  } catch (err) {
-    // 형식 지정 실패는 치명적이지 않음 - 다음 요청에서 재시도
+$('#goto-admin').addEventListener('click', async () => {
+  if (admToken()) {
+    showAdmin();
+  } else {
+    showScreen('scr-admin-login');
   }
-}
+});
+$('#adm-login-btn').addEventListener('click', adminLogin);
+$('#adm-pw').addEventListener('keydown', e => { if (e.key === 'Enter') adminLogin(); });
+$('#adm-back').addEventListener('click', () => loadNameGrid());
+$('#adm-logout').addEventListener('click', adminLogout);
+
+$all('.tabs button').forEach(b => {
+  b.addEventListener('click', () => switchTab(b.dataset.tab));
+});
+$('#dash-refresh').addEventListener('click', loadDash);
+
+$('#stat-row').addEventListener('click', e => {
+  const card = e.target.closest('.stat[data-key]');
+  if (!card) return;
+  showDashDetail(card.dataset.key);
+});
+$('#detail-close').addEventListener('click', closeDetailModal);
+$('#detail-modal').addEventListener('click', e => {
+  if (e.target.id === 'detail-modal') closeDetailModal();
+});
+
+$('#cal-search').addEventListener('click', searchCalDate);
+
+$('#tbl-in').addEventListener('click', e => {
+  const b = e.target.closest('button[data-lunch-edit]');
+  if (!b) return;
+  adminEditLunch(b.dataset.id, b.dataset.lunchEdit, b.dataset.name);
+});
+
+$('#btn-add-maid').addEventListener('click', addMaid);
+$('#new-maid-name').addEventListener('keydown', e => { if (e.key === 'Enter') addMaid(); });
+$('#btn-bulk-add-maid').addEventListener('click', bulkAddMaids);
+$('#btn-bulk-del-maid').addEventListener('click', bulkDeleteMaids);
+$('#tbl-maids').addEventListener('click', e => {
+  const b = e.target.closest('button[data-act]');
+  if (!b) return;
+  maidRowAction(b.dataset.act, b.dataset.id, b.dataset.name);
+});
+
+$('#btn-add-admin').addEventListener('click', addAdmin);
+$('#tbl-admins').addEventListener('click', e => {
+  const b = e.target.closest('button[data-act]');
+  if (!b) return;
+  adminRowAction(b.dataset.act, b.dataset.id, b.dataset.name);
+});
+$('#btn-pw-change').addEventListener('click', changeOwnPassword);
+
+$('#btn-export').addEventListener('click', exportRange);
+
+/* ---------------------------------------------------------
+ * 12. 초기 진입
+ * --------------------------------------------------------- */
+loadNameGrid();
