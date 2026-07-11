@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="theme-color" content="#17263B">
+<title>[DEV] 출근확인 Check-In · 호텔어라운드 속초</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@400;500;700;900&display=swap" rel="stylesheet">
+<style>
+:root{
+  --ink:#17263B;        /* 새벽의 동해 남색 */
+  --bg:#F2F5F8;
+  --card:#FFFFFF;
+  --line:#DDE4EC;
+  --blue:#1D5FBF;       /* 주 동작 */
+  --green:#188A5D;      /* 출근 완료 / 먹음 */
+  --red:#C24141;        /* 경고 / 안먹음 */
+  --muted:#6B7A8F;
+  --radius:16px;
+}
+*{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{height:100%}
+body{
+  font-family:'Noto Sans KR',system-ui,sans-serif;
+  background:var(--bg);color:var(--ink);
+  font-size:17px;line-height:1.5;
+}
+#app{max-width:520px;margin:0 auto;min-height:100%;display:flex;flex-direction:column}
+
+/* ---------- 한영 병기 보조 ---------- */
+.en{display:block;font-size:.74em;font-weight:500;opacity:.75;line-height:1.35}
+b .en,th .en{font-weight:600}
+.btn .en{font-size:.72em;font-weight:500;opacity:.85}
+.slash-en{font-weight:500;opacity:.75;font-size:.9em}
+
+/* ---------- 공통 ---------- */
+header.top{
+  padding:20px 20px 12px;display:flex;align-items:baseline;justify-content:space-between;
+}
+header.top .brand{font-weight:900;font-size:15px;letter-spacing:.14em;color:var(--muted)}
+header.top .who{font-weight:700;font-size:15px;color:var(--blue)}
+main{flex:1;padding:8px 20px 40px}
+h1.page{font-size:26px;font-weight:900;margin:8px 0 4px}
+h1.page .en{font-size:.6em}
+p.sub{color:var(--muted);font-size:15px;margin-bottom:20px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--radius);padding:20px;margin-bottom:16px}
+.btn{
+  display:block;width:100%;border:none;border-radius:14px;cursor:pointer;
+  font-family:inherit;font-size:18px;font-weight:700;padding:16px;
+  background:var(--blue);color:#fff;transition:opacity .15s;
+}
+.btn:active{opacity:.8}
+.btn.ghost{background:transparent;color:var(--muted);font-weight:500;font-size:15px;padding:10px}
+.btn.ghost .en{display:inline;font-size:.9em;opacity:.85}
+.btn.danger{background:var(--red)}
+.btn.green{background:var(--green)}
+.btn.small{width:auto;display:inline-block;padding:8px 14px;font-size:14px;border-radius:10px}
+.btn:disabled{opacity:.45;cursor:default}
+input[type=text],input[type=password],input[type=date]{
+  width:100%;border:1.5px solid var(--line);border-radius:12px;background:#fff;
+  font-family:inherit;font-size:18px;padding:14px;color:var(--ink);
+}
+input:focus{outline:2px solid var(--blue);outline-offset:1px;border-color:var(--blue)}
+label.fld{display:block;font-size:14px;font-weight:700;color:var(--muted);margin:14px 0 6px}
+label.fld .en{display:inline;font-weight:500;opacity:.8}
+.screen{display:none}
+.screen.on{display:block;animation:fade .18s ease}
+@keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+@media (prefers-reduced-motion:reduce){.screen.on{animation:none}}
+
+/* ---------- 이름 선택 ---------- */
+.name-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.name-grid button{
+  border:1.5px solid var(--line);background:#fff;border-radius:14px;
+  font-family:inherit;font-size:19px;font-weight:700;padding:22px 8px;cursor:pointer;color:var(--ink);
+}
+.name-grid button:active{background:var(--bg)}
+
+/* ---------- PIN ---------- */
+.pin-box{display:flex;gap:10px;justify-content:center;margin:18px 0}
+.pin-box input{
+  width:58px;height:68px;text-align:center;font-size:30px;font-weight:900;
+  border:1.5px solid var(--line);border-radius:14px;
+}
+.notice{font-size:14px;color:var(--muted);text-align:center}
+.notice.err{color:var(--red);font-weight:700}
+
+/* ---------- 메이드 메인: 시그니처 출근 버튼 ---------- */
+.lunch-toggle{display:grid;grid-template-columns:1fr 1fr;gap:0;border:1.5px solid var(--line);border-radius:16px;overflow:hidden;margin:14px 0 22px}
+.lunch-toggle button{
+  border:none;background:#fff;font-family:inherit;font-size:19px;font-weight:700;
+  padding:14px 6px;cursor:pointer;color:var(--muted);
+}
+.lunch-toggle button .en{font-size:.7em}
+.lunch-toggle button.on-y{background:var(--green);color:#fff}
+.lunch-toggle button.on-n{background:var(--red);color:#fff}
+.checkin-wrap{display:flex;justify-content:center;margin:26px 0}
+.checkin-btn{
+  width:190px;height:190px;border-radius:50%;border:none;cursor:pointer;
+  background:var(--blue);color:#fff;font-family:inherit;
+  font-size:30px;font-weight:900;letter-spacing:.06em;
+  box-shadow:0 10px 24px rgba(29,95,191,.35);
+  transition:transform .12s;
+}
+.checkin-btn .en{font-size:.5em;letter-spacing:.02em;font-weight:700}
+.checkin-btn:active{transform:scale(.96)}
+.done-card{text-align:center;padding:30px 20px}
+.done-card .time{font-size:44px;font-weight:900;font-variant-numeric:tabular-nums;color:var(--green);margin:6px 0}
+.done-card .lbl{font-size:14px;font-weight:700;color:var(--muted);letter-spacing:.1em}
+.stamp{font-size:12px;color:var(--muted);margin-top:8px;font-variant-numeric:tabular-nums}
+
+/* ---------- 관리자 ---------- */
+.tabs{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:18px}
+.tabs button{
+  border:none;background:transparent;font-family:inherit;font-size:15px;font-weight:700;
+  padding:8px 2px;cursor:pointer;color:var(--muted);border-bottom:3px solid transparent;
+}
+.tabs button .en{font-size:.72em}
+.tabs button.on{color:var(--ink);border-bottom-color:var(--blue)}
+.stat-row{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-bottom:16px}
+.stat{background:#fff;border:1px solid var(--line);border-radius:12px;padding:12px 6px;text-align:center}
+.stat b{display:block;font-size:24px;font-weight:900;font-variant-numeric:tabular-nums}
+.stat span{font-size:12px;color:var(--muted);font-weight:700}
+.stat span .en{font-size:.85em}
+table.list{width:100%;border-collapse:collapse;font-size:14px}
+table.list th{font-size:12px;color:var(--muted);text-align:left;font-weight:700;padding:8px 6px;border-bottom:1.5px solid var(--line)}
+table.list td{padding:10px 6px;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums;vertical-align:middle}
+.pill{display:inline-block;font-size:12px;font-weight:700;padding:2px 8px;border-radius:99px}
+.pill.y{background:#E3F4EC;color:var(--green)}
+.pill.n{background:#F9E7E7;color:var(--red)}
+.pill.gray{background:#EDF1F5;color:var(--muted)}
+.row-actions{display:flex;gap:6px;flex-wrap:wrap}
+.inline-add{display:flex;gap:8px;margin-bottom:14px}
+.inline-add input{flex:1}
+.inline-add .btn{width:auto;padding:12px 18px;font-size:15px}
+.range{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px}
+.stat{cursor:pointer;transition:background .1s}
+.stat:active{background:var(--bg)}
+textarea{width:100%;border:1.5px solid var(--line);border-radius:12px;background:#fff;font-family:inherit;font-size:16px;padding:12px;color:var(--ink);resize:vertical}
+textarea:focus{outline:2px solid var(--blue);outline-offset:1px;border-color:var(--blue)}
+details.card{padding:16px 20px}
+details.card summary{cursor:pointer;font-weight:700;font-size:15px;list-style:none}
+details.card summary::-webkit-details-marker{display:none}
+details.card summary::before{content:'+ ';color:var(--blue);font-weight:900}
+details.card[open] summary::before{content:'- '}
+.chk-col{width:30px}
+.maid-chk{width:18px;height:18px}
+
+/* ---------- 상세 바텀시트 모달 ---------- */
+#detail-modal{position:fixed;inset:0;background:rgba(23,38,59,.55);display:none;align-items:flex-end;justify-content:center;z-index:98}
+#detail-modal.on{display:flex}
+#detail-modal .sheet{background:#fff;width:100%;max-width:520px;border-radius:20px 20px 0 0;padding:20px 20px 30px;max-height:78vh;overflow-y:auto;animation:sheetup .18s ease}
+@keyframes sheetup{from{transform:translateY(16px);opacity:.4}to{transform:none;opacity:1}}
+#detail-modal .sheet-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;gap:10px}
+#detail-modal .sheet-head h2{font-size:18px;font-weight:900;line-height:1.3}
+#detail-modal .sheet-head h2 .en{font-size:.62em;display:block;font-weight:600;opacity:.75}
+#detail-modal .close{flex:none;border:none;background:var(--bg);width:34px;height:34px;border-radius:50%;font-size:16px;font-weight:700;cursor:pointer;color:var(--muted)}
+
+/* ---------- 로딩 오버레이 ---------- */
+#overlay{
+  position:fixed;inset:0;background:rgba(23,38,59,.55);display:none;
+  align-items:center;justify-content:center;z-index:99;
+}
+#overlay.on{display:flex}
+#overlay .box{background:#fff;border-radius:18px;padding:26px 30px;text-align:center;max-width:280px}
+.spin{
+  width:36px;height:36px;border-radius:50%;margin:0 auto 12px;
+  border:4px solid var(--line);border-top-color:var(--blue);
+  animation:sp 0.8s linear infinite;
+}
+@keyframes sp{to{transform:rotate(360deg)}}
+#overlay .msg{font-size:15px;font-weight:700}
+#overlay .hint{font-size:13px;color:var(--muted);margin-top:6px;display:none}
+#overlay.slow .hint{display:block}
+
+/* ---------- 토스트 ---------- */
+#toast{
+  position:fixed;left:50%;bottom:30px;transform:translateX(-50%);
+  background:var(--ink);color:#fff;font-size:15px;font-weight:700;
+  padding:12px 20px;border-radius:12px;opacity:0;pointer-events:none;
+  transition:opacity .2s;z-index:100;max-width:88%;text-align:center;
+}
+#toast.on{opacity:1}
+
+footer{padding:12px 20px 28px;text-align:center}
+footer button{border:none;background:none;font-family:inherit;color:var(--muted);font-size:13px;cursor:pointer;text-decoration:underline}
+</style>
+</head>
+<body>
+<div style="position:fixed;top:0;left:0;right:0;z-index:99999;background:#e11d48;color:#fff;text-align:center;font-weight:700;font-size:13px;padding:4px 0;font-family:sans-serif;">⚠ DEV / TEST ENVIRONMENT — 실제 근태 데이터 아님</div>
+<div id="app">
+  <header class="top">
+    <span class="brand">HOTEL AROUND SOKCHO</span>
+    <span class="who" id="whoami"></span>
+  </header>
+
+  <main>
+    <!-- 메이드: 이름 선택 -->
+    <section class="screen" id="scr-name">
+      <h1 class="page">안녕하세요!<span class="en">Hello!</span></h1>
+      <p class="sub">본인 이름을 눌러주세요.<span class="en">Please tap your name.</span></p>
+      <div class="name-grid" id="name-grid"></div>
+      <p class="notice" id="name-empty" style="display:none;margin-top:20px">
+        등록된 명단이 없습니다. 관리자에게 이름 등록을 요청해 주세요.
+        <span class="en">No names registered. Please ask the manager to add your name.</span>
+      </p>
+    </section>
+
+    <!-- 메이드: PIN 등록/입력 -->
+    <section class="screen" id="scr-pin">
+      <h1 class="page" id="pin-title"></h1>
+      <p class="sub" id="pin-sub"></p>
+      <div class="card">
+        <div class="pin-box" id="pin-box1">
+          <input type="password" inputmode="numeric" maxlength="1" autocomplete="off">
+          <input type="password" inputmode="numeric" maxlength="1" autocomplete="off">
+          <input type="password" inputmode="numeric" maxlength="1" autocomplete="off">
+          <input type="password" inputmode="numeric" maxlength="1" autocomplete="off">
+        </div>
+        <div id="pin-confirm-wrap" style="display:none">
+          <p class="notice">확인을 위해 한 번 더 입력해 주세요.<span class="en">Please enter it once more to confirm.</span></p>
+          <div class="pin-box" id="pin-box2">
+            <input type="password" inputmode="numeric" maxlength="1" autocomplete="off">
+            <input type="password" inputmode="numeric" maxlength="1" autocomplete="off">
+            <input type="password" inputmode="numeric" maxlength="1" autocomplete="off">
+            <input type="password" inputmode="numeric" maxlength="1" autocomplete="off">
+          </div>
+        </div>
+        <p class="notice err" id="pin-err"></p>
+        <button class="btn" id="pin-submit" style="margin-top:14px">확인<span class="en">OK</span></button>
+      </div>
+      <button class="btn ghost" id="pin-reset-link">비밀번호(PIN)를 잊으셨나요? <span class="en">Forgot your PIN?</span></button>
+      <button class="btn ghost" id="pin-back">← 이름 다시 선택 <span class="en">Choose name again</span></button>
+    </section>
+
+    <!-- 메이드: 메인 -->
+    <section class="screen" id="scr-main">
+      <h1 class="page"><span id="main-name"></span>님</h1>
+      <p class="sub" id="main-date"></p>
+
+      <!-- 출근 전 -->
+      <div id="before-checkin" style="display:none">
+        <div class="card">
+          <b style="font-size:16px">오늘 점심을 드시나요?<span class="en">Will you eat lunch today?</span></b>
+          <div class="lunch-toggle" id="lunch-pre">
+            <button data-v="Y">먹어요<span class="en">Yes, I eat</span></button>
+            <button data-v="N">안 먹어요<span class="en">No, I skip</span></button>
+          </div>
+          <div class="checkin-wrap">
+            <button class="checkin-btn" id="btn-checkin">출근<span class="en">Check In</span></button>
+          </div>
+          <p class="notice">점심을 먼저 선택한 뒤 출근 버튼을 눌러주세요.<span class="en">Choose lunch first, then tap the Check In button.</span></p>
+        </div>
+      </div>
+
+      <!-- 출근 후 -->
+      <div id="after-checkin" style="display:none">
+        <div class="card done-card">
+          <div class="lbl">출근 완료 · CHECKED IN</div>
+          <div class="time" id="done-time"></div>
+          <div class="stamp">오늘도 좋은 하루 되세요 · Have a great day 🌊</div>
+        </div>
+        <div class="card">
+          <b style="font-size:16px">오늘 점심<span class="en">Today's lunch</span></b>
+          <div class="lunch-toggle" id="lunch-post">
+            <button data-v="Y">먹어요<span class="en">Yes, I eat</span></button>
+            <button data-v="N">안 먹어요<span class="en">No, I skip</span></button>
+          </div>
+          <p class="notice">점심은 오늘 안에 언제든 바꿀 수 있어요.<span class="en">You can change your lunch anytime today.</span></p>
+          <p class="stamp" id="lunch-updated" style="text-align:center"></p>
+        </div>
+      </div>
+
+      <button class="btn ghost" id="main-logout">다른 이름으로 접속 <span class="en">Use another name</span></button>
+    </section>
+
+    <!-- 관리자: 로그인 -->
+    <section class="screen" id="scr-admin-login">
+      <h1 class="page">관리자 로그인<span class="en">Manager Login</span></h1>
+      <p class="sub">관리자 계정으로 로그인해 주세요.<span class="en">Please sign in with a manager account.</span></p>
+      <div class="card">
+        <label class="fld">아이디 <span class="en">/ Username</span></label>
+        <input type="text" id="adm-id" autocomplete="username">
+        <label class="fld">비밀번호 <span class="en">/ Password</span></label>
+        <input type="password" id="adm-pw" autocomplete="current-password">
+        <button class="btn" id="adm-login-btn" style="margin-top:18px">로그인<span class="en">Sign in</span></button>
+      </div>
+      <button class="btn ghost" id="adm-back">← 출근 화면으로 <span class="en">Back to check-in</span></button>
+    </section>
+
+    <!-- 관리자: 메인 -->
+    <section class="screen" id="scr-admin">
+      <h1 class="page">관리자<span class="en">Manager</span></h1>
+      <div class="tabs">
+        <button data-tab="dash" class="on">현황<span class="en">Status</span></button>
+        <button data-tab="maids">메이드<span class="en">Maids</span></button>
+        <button data-tab="admins">관리자<span class="en">Admins</span></button>
+        <button data-tab="export">정산<span class="en">Export</span></button>
+      </div>
+
+      <!-- 현황 -->
+      <div id="tab-dash">
+        <div class="stat-row" id="stat-row">
+          <div class="stat" data-key="total"><b id="st-total">-</b><span>전체<span class="en">Total</span></span></div>
+          <div class="stat" data-key="in"><b id="st-in">-</b><span>출근<span class="en">In</span></span></div>
+          <div class="stat" data-key="y"><b id="st-y" style="color:var(--green)">-</b><span>점심 먹음<span class="en">Lunch Y</span></span></div>
+          <div class="stat" data-key="n"><b id="st-n" style="color:var(--red)">-</b><span>안 먹음<span class="en">Lunch N</span></span></div>
+        </div>
+        <p class="notice" style="text-align:left;margin:-8px 0 14px">카드를 누르면 상세 명단을 볼 수 있어요.<span class="en">Tap a card to see the detailed list.</span></p>
+        <div class="card">
+          <b>출근한 메이드<span class="en">Checked-in maids</span></b>
+          <table class="list" id="tbl-in"><thead><tr><th>이름 <span class="slash-en">Name</span></th><th>출근 <span class="slash-en">In</span></th><th>점심 <span class="slash-en">Lunch</span></th><th>점심변경 <span class="slash-en">Updated</span></th></tr></thead><tbody></tbody></table>
+        </div>
+        <div class="card">
+          <b>미출근<span class="en">Not checked in</span></b>
+          <table class="list" id="tbl-out"><thead><tr><th>이름 <span class="slash-en">Name</span></th></tr></thead><tbody></tbody></table>
+        </div>
+        <button class="btn" id="dash-refresh">새로고침<span class="en">Refresh</span></button>
+
+        <p class="sub" style="margin:26px 0 0">다른 날짜의 기록이 궁금하신가요?<span class="en">Looking for another day's records?</span></p>
+        <div class="card">
+          <b>날짜별 조회<span class="en">Look up by date</span></b>
+          <label class="fld" style="margin-top:12px">조회할 날짜 <span class="en">/ Date</span></label>
+          <input type="date" id="cal-date">
+          <button class="btn" id="cal-search" style="margin-top:12px">조회<span class="en">Look up</span></button>
+          <div id="cal-result" style="margin-top:14px"></div>
+        </div>
+      </div>
+
+      <!-- 메이드 관리 -->
+      <div id="tab-maids" style="display:none">
+        <div class="inline-add">
+          <input type="text" id="new-maid-name" placeholder="새 메이드 이름 / New maid name">
+          <button class="btn" id="btn-add-maid">추가<span class="en">Add</span></button>
+        </div>
+        <details class="card" style="margin-bottom:14px">
+          <summary>여러 명 한 번에 추가 <span class="en">Add multiple maids at once</span></summary>
+          <p class="notice" style="text-align:left;margin-top:10px">이름을 한 줄에 하나씩 입력하세요. 이미 등록된 이름은 자동으로 건너뜁니다.<span class="en">Enter one name per line. Names that already exist will be skipped automatically.</span></p>
+          <textarea id="bulk-maid-names" rows="4" placeholder="예 / e.g.&#10;최지영&#10;박은정&#10;이수민" style="margin-top:10px"></textarea>
+          <button class="btn" id="btn-bulk-add-maid" style="margin-top:12px">일괄 추가<span class="en">Add all</span></button>
+        </details>
+        <div class="card">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:8px">
+            <b>메이드 명단<span class="en">Maid list</span></b>
+            <button class="btn small danger" id="btn-bulk-del-maid">선택 삭제<span class="en">Delete selected</span></button>
+          </div>
+          <table class="list" id="tbl-maids"><thead><tr><th class="chk-col"></th><th>이름 <span class="slash-en">Name</span></th><th>상태 <span class="slash-en">Status</span></th><th>관리 <span class="slash-en">Actions</span></th></tr></thead><tbody></tbody></table>
+        </div>
+      </div>
+
+      <!-- 관리자 관리 -->
+      <div id="tab-admins" style="display:none">
+        <div class="inline-add">
+          <input type="text" id="new-adm-id" placeholder="아이디 / Username" style="flex:0.8">
+          <input type="password" id="new-adm-pw" placeholder="비밀번호 / Password">
+          <button class="btn" id="btn-add-admin">추가<span class="en">Add</span></button>
+        </div>
+        <div class="card">
+          <table class="list" id="tbl-admins"><thead><tr><th>아이디 <span class="slash-en">Username</span></th><th>역할 <span class="slash-en">Role</span></th><th>관리 <span class="slash-en">Actions</span></th></tr></thead><tbody></tbody></table>
+        </div>
+        <div class="card">
+          <b>내 비밀번호 변경<span class="en">Change my password</span></b>
+          <label class="fld">현재 비밀번호 <span class="en">/ Current password</span></label>
+          <input type="password" id="pw-old" autocomplete="current-password">
+          <label class="fld">새 비밀번호 <span class="en">/ New password</span></label>
+          <input type="password" id="pw-new" autocomplete="new-password">
+          <button class="btn" id="btn-pw-change" style="margin-top:14px">변경<span class="en">Change</span></button>
+        </div>
+      </div>
+
+      <!-- 정산 -->
+      <div id="tab-export" style="display:none">
+        <div class="card">
+          <b>기간별 출근기록 다운로드<span class="en">Download attendance by date range</span></b>
+          <div class="range" style="margin-top:12px">
+            <div><label class="fld" style="margin-top:0">시작일 <span class="en">/ From</span></label><input type="date" id="exp-start"></div>
+            <div><label class="fld" style="margin-top:0">종료일 <span class="en">/ To</span></label><input type="date" id="exp-end"></div>
+          </div>
+          <button class="btn green" id="btn-export">엑셀 다운로드<span class="en">Download Excel</span></button>
+          <p class="notice" style="margin-top:10px">삭제된 메이드의 기록도 이름 그대로 포함됩니다.<span class="en">Records of removed maids are included under their original names.</span></p>
+        </div>
+      </div>
+
+      <button class="btn ghost" id="adm-logout">로그아웃 <span class="en">Sign out</span></button>
+    </section>
+  </main>
+
+  <footer>
+    <button id="goto-admin">관리자 화면 · Manager</button>
+  </footer>
+</div>
+
+<!-- 로딩 오버레이 -->
+<div id="overlay">
+  <div class="box">
+    <div class="spin"></div>
+    <div class="msg">처리 중... Processing...</div>
+    <div class="hint">서버를 깨우는 중이에요. 첫 접속은 조금 오래 걸릴 수 있어요.<br>Waking up the server. The first visit may take a moment.</div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<!-- 대시보드 카드 상세 / 날짜별 조회 결과 모달 -->
+<div id="detail-modal">
+  <div class="sheet">
+    <div class="sheet-head">
+      <h2 id="detail-title"></h2>
+      <button class="close" id="detail-close" aria-label="닫기 Close">✕</button>
+    </div>
+    <div id="detail-body"></div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
