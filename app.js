@@ -491,26 +491,34 @@ async function loadDash() {
 
   $('#dash-lunch-lock-notice').style.display = data.lunchLocked ? 'block' : 'none';
 
-  const inBody = $('#tbl-in tbody');
+    // [2026-07-18] 표(table) → 컴팩트 리스트(.ci-row)로 렌더링 변경.
+  // #tbl-in은 이제 <table>이 아니라 <div class="ci-list">이다.
+  const inBody = $('#tbl-in');
   inBody.innerHTML = '';
   (data.checkedInList || []).forEach(r => {
-    const tr = document.createElement('tr');
-    const lv = r.lunch;
-    const pill = isLunchYes(lv) ? '<span class="pill y">먹음/Yes</span>'
-      : isLunchNo(lv) ? '<span class="pill n">안먹음/No</span>'
-      : '<span class="pill gray">-</span>';
-    tr.innerHTML = '<td>' + escapeHtml(r.name || r.maidName) + '</td>'
-      + '<td>' + escapeHtml(r.checkInTime || '') + '</td>'
-      + '<td>' + pill + '</td>'
-      + '<td>' + escapeHtml(r.lunchUpdatedAt || '') + '</td>'
-      + '<td><div class="row-actions">'
-      + '<button class="btn small" data-lunch-edit="Y" data-id="' + r.maidId + '" data-name="' + escapeHtml(r.name || r.maidName) + '">먹음<span class="en">Yes</span></button>'
-      + '<button class="btn small danger" data-lunch-edit="N" data-id="' + r.maidId + '" data-name="' + escapeHtml(r.name || r.maidName) + '">안먹음<span class="en">No</span></button>'
-      + '</div></td>';
-    inBody.appendChild(tr);
+  const name = r.name || r.maidName;
+  const lv = r.lunch;
+  const pill = isLunchYes(lv) ? '<span class="pill y">먹음/Yes</span>'
+  : isLunchNo(lv) ? '<span class="pill n">안먹음/No</span>'
+  : '<span class="pill gray">-</span>';
+  const updated = r.lunchUpdatedAt ? '<span class="ci-updated">변경 ' + escapeHtml(r.lunchUpdatedAt) + '</span>' : '';
+  const row = document.createElement('div');
+  row.className = 'ci-row';
+  row.innerHTML = '<div class="ci-left">'
+  + '<div class="ci-name">' + escapeHtml(name) + '</div>'
+  + '<div class="ci-lunch-line">' + pill + updated + '</div>'
+  + '</div>'
+  + '<div class="ci-right">'
+  + '<div class="ci-time">' + escapeHtml(r.checkInTime || '') + '</div>'
+  + '<div class="row-actions">'
+  + '<button class="btn small" data-lunch-edit="Y" data-id="' + r.maidId + '" data-name="' + escapeHtml(name) + '">먹음<span class="en">Yes</span></button>'
+  + '<button class="btn small danger" data-lunch-edit="N" data-id="' + r.maidId + '" data-name="' + escapeHtml(name) + '">안먹음<span class="en">No</span></button>'
+  + '</div>'
+  + '</div>';
+  inBody.appendChild(row);
   });
   if (!(data.checkedInList || []).length) {
-    inBody.innerHTML = '<tr><td colspan="5" class="notice">아직 출근한 메이드가 없습니다. / No one has checked in yet.</td></tr>';
+  inBody.innerHTML = '<p class="notice ci-empty">아직 출근한 메이드가 없습니다. / No one has checked in yet.</p>';
   }
 
   const outBody = $('#tbl-out tbody');
