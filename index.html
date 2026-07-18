@@ -134,6 +134,19 @@ table.list td{padding:10px 6px;border-bottom:1px solid var(--line);font-variant-
 .pill.n{background:#F9E7E7;color:var(--red)}
 .pill.gray{background:#EDF1F5;color:var(--muted)}
 .row-actions{display:flex;gap:6px;flex-wrap:wrap}
+
+/* ---------- 출근현황 컴팩트 리스트 (표 대체) ---------- */
+.ci-list{margin-top:2px}
+.ci-row{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;padding:12px 0;border-bottom:1px solid var(--line)}
+.ci-row:last-child{border-bottom:none}
+.ci-left{display:flex;flex-direction:column;gap:5px;min-width:0}
+.ci-name{font-weight:700;font-size:15px}
+.ci-lunch-line{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.ci-updated{font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+.ci-right{display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex:none}
+.ci-time{font-size:13px;color:var(--muted);font-weight:700;font-variant-numeric:tabular-nums}
+.ci-empty{padding:14px 0;text-align:left}
+
 .inline-add{display:flex;gap:8px;margin-bottom:14px}
 .inline-add input{flex:1}
 .inline-add .btn{width:auto;padding:12px 18px;font-size:15px}
@@ -313,7 +326,7 @@ footer button{border:none;background:none;font-family:inherit;color:var(--muted)
 <p class="notice" style="text-align:left;margin:-8px 0 14px">카드를 누르면 상세 명단을 볼 수 있어요.<span class="en">Tap a card to see the detailed list.</span></p>
 <div class="card">
 <b>출근한 메이드<span class="en">Checked-in maids</span></b>
-<table class="list" id="tbl-in"><thead><tr><th>이름 <span class="slash-en">Name</span></th><th>출근 <span class="slash-en">In</span></th><th>점심 <span class="slash-en">Lunch</span></th><th>점심변경 <span class="slash-en">Updated</span></th><th></th></tr></thead><tbody></tbody></table>
+<div class="ci-list" id="tbl-in"></div>
 </div>
 <div class="card">
 <b>미출근<span class="en">Not checked in</span></b>
