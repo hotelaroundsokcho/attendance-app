@@ -909,14 +909,25 @@ async function exportRange() {
     toast('엑셀 모듈을 불러오지 못했습니다. 새로고침 후 다시 시도해 주세요. / Excel module failed to load. Please refresh and try again.');
     return;
   }
-  const aoa = [['날짜 Date', '이름 Name', '출근시각 Check-in', '점심 Lunch', '점심 변경시각 Lunch updated']];
+  // 출근 탭: 날짜 · 이름 · 출근시각
+  const attAoa = [['날짜 Date', '이름 Name', '출근시각 Check-in']];
   rows.forEach(r => {
-    aoa.push([r.date || '', r.maidName || '', r.checkInTime || '', lunchLabel(r.lunch), r.lunchUpdatedAt || '']);
+    attAoa.push([r.date || '', r.maidName || '', r.checkInTime || '']);
   });
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws['!cols'] = [{ wch: 12 }, { wch: 14 }, { wch: 12 }, { wch: 12 }, { wch: 20 }];
+  const attWs = XLSX.utils.aoa_to_sheet(attAoa);
+  attWs['!cols'] = [{ wch: 12 }, { wch: 14 }, { wch: 12 }];
+
+  // 점심 탭: 날짜 · 이름 · 점심여부(먹음/안먹음) · 변경시각
+  const lunchAoa = [['날짜 Date', '이름 Name', '점심 Lunch', '점심 변경시각 Lunch updated']];
+  rows.forEach(r => {
+    lunchAoa.push([r.date || '', r.maidName || '', lunchLabel(r.lunch), r.lunchUpdatedAt || '']);
+  });
+  const lunchWs = XLSX.utils.aoa_to_sheet(lunchAoa);
+  lunchWs['!cols'] = [{ wch: 12 }, { wch: 14 }, { wch: 12 }, { wch: 20 }];
+
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'attendance');
+  XLSX.utils.book_append_sheet(wb, attWs, '출근');
+  XLSX.utils.book_append_sheet(wb, lunchWs, '점심');
   XLSX.writeFile(wb, '출근기록_attendance_' + startDate + '_' + endDate + '.xlsx');
   toast('엑셀 파일이 다운로드되었습니다. / Excel file downloaded.');
 }
