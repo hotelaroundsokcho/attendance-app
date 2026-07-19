@@ -911,14 +911,88 @@ async function exportRange() {
     toast('엑셀 모듈을 불러오지 못했습니다. 새로고침 후 다시 시도해 주세요. / Excel module failed to load. Please refresh and try again.');
     return;
   }
-  const aoa = [['날짜 Date', '이름 Name', '출근시각 Check-in', '점심 Lunch', '점심 변경시각 Lunch updated']];
+
+  // 1) 기간 내 모든 날짜 목록 생성 (UTC 기준 계산으로 타임존 시프트 방지, 최대 약 10년 안전장치)
+  function parseYmd(s) {
+    const p = String(s || '').split('-');
+    return { y: parseInt(p[0], 10), m: parseInt(p[1], 10), d: parseInt(p[2], 10) };
+  }
+  function formatYmd(y, m, d) {
+    const mm = String(m).padStart(2, '0');
+    const dd = String(d).padStart(2, '0');
+    return y + '-' + mm + '-' + dd;
+  }
+  const startP = parseYmd(startDate);
+  const endP = parseYmd(endDate);
+  const dateList = [];
+  if (startP.y && startP.m && startP.d && endP.y && endP.m && endP.d) {
+    let cursor = Date.UTC(startP.y, startP.m - 1, startP.d);
+    const endTime = Date.UTC(endP.y, endP.m - 1, endP.d);
+    let guard = 0;
+    while (cursor <= endTime && guard < 3660) {
+      const dt = new Date(cursor);
+      dateList.push(formatYmd(dt.getUTCFullYear(), dt.getUTCMonth() + 1, dt.getUTCDate()));
+      cursor += 86400000;
+      guard++;
+    }
+  }
+  if (!dateList.length) {
+    toast('날짜 범위를 확인해 주세요. / Please check the date range.');
+    return;
+  }
+
+  // 2) 기간 내 등장한 메이드 목록 (이름 기준 정렬, 이름 없으면 ID로 대체)
+  const maidSet = {};
   rows.forEach(r => {
-    aoa.push([r.date || '', r.maidName || '', r.checkInTime || '', lunchLabel(r.lunch), r.lunchUpdatedAt || '']);
+    const name = r.maidName || r.maidId || '이름없음/Unknown';
+    maidSet[name] = true;
   });
+  const maidNames = Object.keys(maidSet).sort((a, b) => a.localeCompare(b, 'ko'));
+
+  // 3) 날짜×메이드 조회용 맵 (같은 날 중복 기록이 있으면 마지막 기록을 채택)
+  const cellMap = {};
+  rows.forEach(r => {
+    const name = r.maidName || r.maidId || '이름없음/Unknown';
+    const key = (r.date || '') + '|' + name;
+    cellMap[key] = r;
+  });
+
+  // 4) 병합 헤더 2행(메이드 이름 / 출근·점심) + 날짜별 데이터 행
+  const row0 = ['날짜 Date'];
+  const row1 = [''];
+  maidNames.forEach(name => {
+    row0.push(name, '');
+    row1.push('출근시각 Check-in', '점심 Lunch');
+  });
+  const aoa = [row0, row1];
+  dateList.forEach(date => {
+    const line = [date];
+    maidNames.forEach(name => {
+      const rec = cellMap[date + '|' + name];
+      const checkIn = rec ? (rec.checkInTime || '') : '';
+      const lunchCell = rec && isLunchYes(rec.lunch) ? '먹음/Yes' : '';
+      line.push(checkIn, lunchCell);
+    });
+    aoa.push(line);
+  });
+
   const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws['!cols'] = [{ wch: 12 }, { wch: 14 }, { wch: 12 }, { wch: 12 }, { wch: 20 }];
+
+  // 5) 병합 셀: 날짜 헤더 세로 병합 + 메이드 이름 가로(2칸) 병합
+  const merges = [{ s: { r: 0, c: 0 }, e: { r: 1, c: 0 } }];
+  maidNames.forEach((name, idx) => {
+    const col = 1 + idx * 2;
+    merges.push({ s: { r: 0, c: col }, e: { r: 0, c: col + 1 } });
+  });
+  ws['!merges'] = merges;
+
+  // 6) 열 너비
+  const cols = [{ wch: 12 }];
+  maidNames.forEach(() => { cols.push({ wch: 12 }, { wch: 12 }); });
+  ws['!cols'] = cols;
+
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, 'attendance');
+  XLSX.utils.book_append_sheet(wb, ws, '정산');
   XLSX.writeFile(wb, '출근기록_attendance_' + startDate + '_' + endDate + '.xlsx');
   toast('엑셀 파일이 다운로드되었습니다. / Excel file downloaded.');
 }
