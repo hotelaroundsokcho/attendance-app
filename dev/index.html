@@ -73,6 +73,7 @@ transition:transform .1s ease;
 .btn.green{background:var(--green);box-shadow:0 1px 2px rgba(30,22,80,.2),0 10px 20px rgba(14,124,90,.28)}
 .btn.small{width:auto;display:inline-block;padding:8px 16px;font-size:14px;border-radius:14px;min-height:44px;box-shadow:0 1px 2px rgba(30,22,80,.18)}
 .btn:disabled{background:#E4E0F2;color:var(--muted);cursor:default;box-shadow:none}
+a.btn{text-align:center;text-decoration:none}
 input[type=text],input[type=password],input[type=date]{
 width:100%;min-height:56px;border:2px solid var(--line);border-radius:16px;background:#fff;
 font-family:inherit;font-size:18px;padding:12px 16px;color:var(--ink);
@@ -356,6 +357,13 @@ body:has(#scr-main.on #after-checkin[style*="block"]) .done-card{background:#fff
 </div>
 <p class="notice" id="lunch-notice">점심은 13:00까지 언제든 바꿀 수 있어요.<span class="en">You can change your lunch anytime until 13:00.</span></p>
 <p class="stamp" id="lunch-updated" style="text-align:center"></p>
+</div>
+
+<!-- 정비앱 연결 (출근 완료 후에만 노출 / 서버 호출 없음) -->
+<div class="card" id="hk-link-card">
+<b style="font-size:16px">다음은 객실 정비<span class="en">Next: Housekeeping</span></b>
+<a class="btn" id="btn-hk" style="margin-top:12px" href="https://hotelaroundsokcho.github.io/housekeeping-dev/" target="_blank" rel="noopener noreferrer">정비앱 열기<span class="en">Open Housekeeping</span></a>
+<p class="notice" style="margin-top:10px">새 탭에서 열려요. 점심을 바꿀 때는 이 화면으로 돌아오세요.<span class="en">Opens in a new tab. Come back here if you need to change lunch.</span></p>
 </div>
 </div>
 
